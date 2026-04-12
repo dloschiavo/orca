@@ -97,3 +97,6 @@ suppression rule. Tracked as `agent-failure` in the findings system.
 <!-- orca auto-applied (finding cf6dbde8-7edb-4a51-bbf9-dedb038b18bc) -->
 When updating an implementation-audit row, `lastReviewedAt` must stay in sync with the semantic meaning of the status: setting status to `unaudited` must clear (null) `lastReviewedAt`, never stamp it with a new date. Only statuses that represent a completed review (e.g. `compliant`, `non-compliant`, `partial`) should receive a fresh timestamp.
 <!-- /orca auto-applied -->
+<!-- orca auto-applied (finding 837b0922-2401-4944-b6ac-439dc2e4c481) -->
+The 72-hour periodic audit trigger must invoke AI-powered implementation verification (runAuditRowAgent) for stale or unaudited rows — not just filesystem metadata resync. resyncImplementationAudit is a prerequisite step (discover new recipes, detect stale hashes), but it is not an audit. After resync, any row that is unaudited or recipeStale must be queued for the AI agent. Every code path that writes to the implementationAudit table — including the manual PATCH route and the audit-row agent's fallback/error branches — must enforce the lastReviewedAt invariant: status 'unaudited' → lastReviewedAt = null; only completed-review statuses (compliant, non-compliant, partial, implemented, etc.) may stamp a fresh timestamp.
+<!-- /orca auto-applied -->
