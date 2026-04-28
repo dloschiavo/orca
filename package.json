@@ -1,0 +1,33 @@
+{
+  "name": "orca",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Linear-style PM frontend for agentic code development — the orchestrator.",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel --filter=./apps/* --filter=./packages/* dev",
+    "dev:server": "pnpm --filter @orca/server dev",
+    "dev:web": "pnpm --filter @orca/web dev",
+    "typecheck": "pnpm -r typecheck",
+    "db:push": "pnpm --filter @orca/db push",
+    "db:studio": "pnpm --filter @orca/db studio",
+    "seed:audit": "pnpm --filter @orca/server seed:audit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@embedded-postgres/darwin-x64",
+      "@embedded-postgres/darwin-arm64",
+      "@embedded-postgres/linux-x64",
+      "@embedded-postgres/linux-arm64",
+      "esbuild"
+    ]
+  }
+}

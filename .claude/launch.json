@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "orca-web",
+      "runtimeExecutable": "/Users/davidloschiavo/.nvm/versions/node/v20.19.2/bin/node",
+      "runtimeArgs": [
+        "/Users/davidloschiavo/Documents/Goliath/orca/apps/web/node_modules/vite/bin/vite.js",
+        "--port",
+        "5174",
+        "--strictPort",
+        "/Users/davidloschiavo/Documents/Goliath/orca/apps/web"
+      ],
+      "port": 5174
+    }
+  ]
+}

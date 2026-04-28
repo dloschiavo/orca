@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+  :root {
+    color-scheme: dark;
+  }
+}
+
+@layer components {
+  .sidebar-link {
+    @apply flex items-center gap-2 px-3 py-1.5 rounded-md text-sm text-muted hover:text-text hover:bg-surface2 transition-colors;
+  }
+  .sidebar-link.active {
+    @apply text-text bg-surface2;
+  }
+  .state-dot {
+    @apply inline-block w-2 h-2 rounded-full;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-surface2 text-muted border border-border;
+  }
+  .btn {
+    @apply inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium bg-surface2 hover:bg-border border border-border text-text transition-colors;
+  }
+  .btn-primary {
+    @apply bg-accent hover:bg-accent/90 border-transparent text-white;
+  }
+  .input {
+    @apply w-full bg-surface2 border border-border rounded-md px-3 py-2 text-sm text-text placeholder:text-muted focus:outline-none focus:border-accent;
+  }
+  .cert-cell {
+    @apply inline-block w-5 h-2 rounded-sm;
+  }
+}
