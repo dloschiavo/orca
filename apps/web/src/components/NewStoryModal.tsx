@@ -14,30 +14,31 @@ export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStor
   const [agent, setAgent] = useState("spec-writer");
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-start justify-center pt-24 z-50">
-      <div className="bg-surface border border-border rounded-lg w-[640px] max-w-full shadow-2xl">
-        <div className="px-4 py-3 border-b border-border text-sm font-medium">
-          New story
-        </div>
-        <div className="p-4 space-y-3">
+    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="modal-panel">
+        <div className="modal-header">New story</div>
+        <div className="modal-body">
           <input
-            className="input text-base"
+            className="input"
+            style={{ fontSize: 14 }}
             placeholder="Story title"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             autoFocus
           />
           <textarea
-            className="input text-sm h-40 resize-none"
+            className="input"
+            style={{ fontSize: 13, height: 160, resize: "none" }}
             placeholder="Spec (markdown)."
             value={specMd}
             onChange={(e) => setSpecMd(e.target.value)}
           />
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-muted">State</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>State</span>
               <select
-                className="input text-sm w-auto"
+                className="input"
+                style={{ width: "auto", fontSize: 12 }}
                 value={status}
                 onChange={(e) => setStatus(e.target.value as "icebox" | "planning" | "backlog")}
               >
@@ -46,10 +47,11 @@ export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStor
                 <option value="backlog">Backlog</option>
               </select>
             </div>
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-muted">Agent</label>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "var(--fg-3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Agent</span>
               <select
-                className="input text-sm w-auto"
+                className="input"
+                style={{ width: "auto", fontSize: 12 }}
                 value={agent}
                 onChange={(e) => setAgent(e.target.value)}
               >
@@ -61,7 +63,7 @@ export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStor
             </div>
           </div>
         </div>
-        <div className="px-4 py-3 border-t border-border flex items-center justify-end gap-2">
+        <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button
             className="btn btn-primary"

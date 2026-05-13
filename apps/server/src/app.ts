@@ -18,6 +18,7 @@ import {
   getAvailableModels,
   getAvailableModelsStatus,
 } from "./services/available-models.js";
+import { checkClaudeAuth } from "./services/claude-auth.js";
 
 export interface AppDeps {
   db: OrcaDb;
@@ -46,7 +47,10 @@ export function createApp(deps: AppDeps): Hono<OrcaEnv> {
     await next();
   });
 
-  app.get("/health", (c) => c.json({ ok: true, service: "orca" }));
+  app.get("/health", async (c) => {
+    const auth = await checkClaudeAuth();
+    return c.json({ ok: true, service: "orca", claudeLoggedIn: auth.loggedIn, claudeAuthMethod: auth.method });
+  });
 
   // ─── HOW USAGE DATA WORKS ──────────────────────────────────────────────────
   //

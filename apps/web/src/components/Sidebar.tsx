@@ -1,216 +1,212 @@
-import { NavLink, useNavigate, useLocation } from "react-router-dom";
-import clsx from "clsx";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import {
+  faUser, faClock, faFlag, faComments, faListCheck,
+  faRobot, faBook, faGear,
+} from "@fortawesome/free-solid-svg-icons";
+import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { useProjectContext } from "../state/ProjectContext.js";
 import { api } from "../api.js";
-import type { ServerStatus } from "@orca/shared";
+import type { Story } from "@orca/shared";
+import { resolveAgentDisplay } from "../utils/agentStyle.js";
 
-// Linear-style left rail. Keep it dense, keyboard-friendly, no icons yet
-// (that's one of the things we'll copy from notus/lucide post-MVP).
-
-interface NavItem {
-  to: string;
-  label: string;
-  countKey?: string;
-  // `end` matches the path exactly so `/audit` doesn't stay active on `/audit/x`
-  end?: boolean;
-}
-
-const SECTIONS: { title: string; items: NavItem[] }[] = [
-  {
-    title: "Pipeline",
-    items: [
-      { to: "/stories", label: "All", countKey: "stories" },
-      { to: "/findings", label: "Findings" },
-      { to: "/audit", label: "Audit" },
-    ],
-  },
-  {
-    title: "Admin",
-    items: [
-      { to: "/projects", label: "Projects" },
-      { to: "/projects/add", label: "Add Project" },
-      { to: "/agents", label: "Agents" },
-      { to: "/recipes", label: "Recipes" },
-      { to: "/settings", label: "Settings", end: true },
-    ],
-  },
+// Project dot colors — cycled by index
+const PROJECT_COLORS = [
+  "oklch(0.78 0.16 145)",
+  "oklch(0.78 0.15 60)",
+  "oklch(0.78 0.14 250)",
+  "oklch(0.78 0.14 320)",
+  "oklch(0.78 0.10 200)",
 ];
 
 export function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { projects, activeProjectId, setActiveProjectId, isLoading } =
-    useProjectContext();
+  const { projects, activeProjectId, setActiveProjectId, isLoading } = useProjectContext();
 
-  const { data: statusData } = useQuery({
-    queryKey: ["server-status"],
-    queryFn: () => api.projects.serverStatus(),
-    refetchInterval: 10_000, // poll every 10s
-  });
-  const statusMap = new Map<string, ServerStatus>(
-    (statusData?.statuses ?? []).map((s) => [s.projectId, s]),
-  );
-
-  const { data: storiesData } = useQuery({
-    queryKey: ["stories", activeProjectId],
-    queryFn: () =>
-      activeProjectId
-        ? api.stories.list({ projectId: activeProjectId })
-        : Promise.resolve({ stories: [] }),
-    enabled: !!activeProjectId,
-  });
-  const counts: Record<string, number> = {
-    stories: storiesData?.stories.length ?? 0,
-  };
-
-  // Per-project status counts for sidebar badges.
+  // Per-project story counts for badges
   const { data: storyCounts } = useQuery({
     queryKey: ["story-counts"],
     queryFn: () => api.stories.counts(),
     refetchInterval: 5_000,
   });
-  const projectBadges = new Map<
-    string,
-    { planning: number; implementing: number; qa: number; review: number }
-  >();
+
+  // All stories (for agent activity buckets)
+  const { data: allStoriesData } = useQuery({
+    queryKey: ["all-stories-sidebar"],
+    queryFn: async () => {
+      if (projects.length === 0) return { stories: [] as Story[] };
+      const results = await Promise.all(
+        projects.map((p) => api.stories.list({ projectId: p.id }))
+      );
+      return { stories: results.flatMap((r) => r.stories) };
+    },
+    enabled: projects.length > 0,
+    refetchInterval: 10_000,
+  });
+
+  const allStories = allStoriesData?.stories ?? [];
+
+  // Group active-agent stories by their assigned agent name
+  const agentBuckets = new Map<string, Story[]>();
+  for (const s of allStories) {
+    if (s.status !== "planning" && s.status !== "implementing" && s.status !== "qa") continue;
+    const name = s.agentOverride ?? s.agent ?? "(unknown)";
+    const bucket = agentBuckets.get(name) ?? [];
+    bucket.push(s);
+    agentBuckets.set(name, bucket);
+  }
+  const activeAgentRows = Array.from(agentBuckets.entries()).sort(([a], [b]) => a.localeCompare(b));
+
+  const humanStories = allStories.filter((s) => s.status === "review" || s.status === "blocked");
+
+  const projectBadges = new Map<string, { planning: number; implementing: number; qa: number; review: number }>();
   for (const row of storyCounts?.counts ?? []) {
-    const entry = projectBadges.get(row.projectId) ?? {
-      planning: 0,
-      implementing: 0,
-      qa: 0,
-      review: 0,
-    };
+    const entry = projectBadges.get(row.projectId) ?? { planning: 0, implementing: 0, qa: 0, review: 0 };
     if (row.status === "planning") entry.planning += row.count;
-    if (row.status === "implementing") entry.implementing = row.count;
+    if (row.status === "implementing") entry.implementing += row.count;
     if (row.status === "qa") entry.qa += row.count;
     if (row.status === "review") entry.review += row.count;
     projectBadges.set(row.projectId, entry);
   }
 
+  // Count stories waiting on the human (planning = spec-writer asking questions, review/blocked = needs your input)
+  const planningStories = allStories.filter((s) => s.status === "planning");
+  const waitingOnMe = planningStories.length + humanStories.length;
+
+  function handleProjectClick(projectId: string) {
+    setActiveProjectId(projectId);
+    navigate(
+      location.pathname === "/projects"
+        ? "/projects"
+        : "/stories",
+    );
+  }
+
   return (
-    <aside className="w-56 shrink-0 h-full bg-surface border-r border-border flex flex-col">
-      {/* Workspace label */}
-      <div className="px-3 py-3 border-b border-border">
-        <div className="text-[11px] uppercase tracking-wider text-muted">
-          orca
+    <aside className="sidebar">
+      <div style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
+        {/* Projects */}
+        <div className="sb-section">
+          <span>Projects</span>
+          <span className="plus" title="Add project" onClick={() => navigate("/projects/add")}>+</span>
         </div>
+        {isLoading && <div style={{ padding: "6px var(--pad-x)", color: "var(--fg-3)", fontSize: 11.5 }}>loading…</div>}
+        {projects.map((p, i) => {
+          const active = p.id === activeProjectId;
+          const badges = projectBadges.get(p.id);
+          const hasActive = (badges?.implementing ?? 0) + (badges?.qa ?? 0) > 0;
+          const projectColor = PROJECT_COLORS[i % PROJECT_COLORS.length]!;
+          return (
+            <div
+              key={p.id}
+              className={"sb-item" + (active ? " active" : "")}
+              onClick={() => handleProjectClick(p.id)}
+            >
+              <span className="sb-dot" style={{ background: projectColor }} />
+              <span className="sb-name">{p.name}</span>
+              {hasActive && <span className="sb-active-pulse" title="agent active" />}
+              {badges && (badges.planning + badges.implementing + badges.qa + badges.review) > 0 && (
+                <span className="sb-count">
+                  {badges.planning + badges.implementing + badges.qa + badges.review}
+                </span>
+              )}
+            </div>
+          );
+        })}
+
+        <div className="sb-divider" />
+
+        {/* Active agents — rendered dynamically from story.agent groupings */}
+        <div className="sb-section"><span>Active agents</span></div>
+        {activeAgentRows.length === 0 && humanStories.length === 0 && (
+          <div style={{ padding: "4px var(--pad-x)", color: "var(--fg-3)", fontSize: 11.5 }}>all idle</div>
+        )}
+        {activeAgentRows.map(([name, stories]) => (
+          <AgentRow key={name} agentName={name} stories={stories} />
+        ))}
+        {humanStories.length > 0 && (
+          <AgentRow agentName="__human__" stories={humanStories} />
+        )}
+
+        <div className="sb-divider" />
+
+        {/* Views */}
+        <div className="sb-section"><span>Views</span></div>
+        <SbLink icon={faClock}      name="Waiting on me" count={waitingOnMe} onClick={() => navigate("/stories")} />
+        <SbLink icon={faFlag}       name="Blocked" count={allStories.filter((s) => s.status === "blocked").length} onClick={() => navigate("/stories")} />
+        <SbLink icon={faComments}   name="Refinement Q&A" onClick={() => navigate("/refinement-qa")} />
+        <SbLink icon={faListCheck}  name="Findings" onClick={() => navigate("/findings")} />
+
+        <div className="sb-divider" />
+
+        {/* Admin */}
+        <div className="sb-section"><span>Admin</span></div>
+        <SbLink icon={faRobot} name="Agents" onClick={() => navigate("/agents")} />
+        <SbLink icon={faBook}  name="Recipes" onClick={() => navigate("/recipes")} />
+        <SbLink icon={faGear}  name="Settings" onClick={() => navigate("/settings")} />
       </div>
 
-      <nav className="flex-1 overflow-y-auto py-2">
-        {/* Projects section */}
-        <div className="px-3 py-2">
-          <div className="text-[10px] uppercase tracking-wider text-muted px-1 pb-1">
-            Projects
-          </div>
-          <ul className="space-y-0.5">
-            {isLoading && (
-              <li className="px-2 py-1 text-xs text-muted">loading…</li>
-            )}
-            {!isLoading && projects.length === 0 && (
-              <li className="px-2 py-1 text-xs text-muted">no projects</li>
-            )}
-            {projects.map((p) => {
-              const status = statusMap.get(p.id);
-              const hasLiveStatus = !!status?.endpoints?.length;
-              // Green only if ALL endpoints are running; red if any is down;
-              // empty (border-only) dot if unknown (no config or no live status yet)
-              const allRunning = hasLiveStatus
-                ? status!.endpoints.every((e) => e.running)
-                : false;
-              const badges = projectBadges.get(p.id);
-              return (
-                <li key={p.id}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveProjectId(p.id);
-                      navigate(
-                        location.pathname.startsWith("/audit")
-                          ? "/audit"
-                          : location.pathname === "/projects"
-                          ? "/projects"
-                          : "/stories",
-                      );
-                    }}
-                    className={clsx(
-                      "sidebar-link w-full text-left",
-                      p.id === activeProjectId && "active",
-                    )}
-                  >
-                    <span
-                      className={clsx(
-                        "inline-block w-2 h-2 rounded-full shrink-0",
-                        hasLiveStatus
-                          ? allRunning
-                            ? "bg-done"
-                            : "bg-red-500"
-                          : "border border-muted",
-                      )}
-                    />
-                    <span className="flex-1 truncate">{p.name}</span>
-                    <span className="ml-auto flex items-center gap-1">
-                      {badges?.planning ? (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-violet-400 text-violet-900" title="planning">
-                          {badges.planning}
-                        </span>
-                      ) : null}
-                      {badges?.implementing ? (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-yellow-400 text-yellow-900" title="implementing">
-                          {badges.implementing}
-                        </span>
-                      ) : null}
-                      {badges?.qa ? (
-                        <span className="inline-flex items-center justify-center min-w-[22px] h-[18px] px-1.5 text-[10px] font-medium rounded bg-orange-400 text-orange-900" title="qa">
-                          {badges.qa}
-                        </span>
-                      ) : null}
-                      {badges?.review ? (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-blue-200 text-blue-800" title="review">
-                          {badges.review}
-                        </span>
-                      ) : null}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-
-        {SECTIONS.map((section) => (
-          <div key={section.title} className="px-3 py-2">
-            <div className="text-[10px] uppercase tracking-wider text-muted px-1 pb-1">
-              {section.title}
-            </div>
-            <ul className="space-y-0.5">
-              {section.items.map((item) => (
-                <li key={item.to}>
-                  <NavLink
-                    to={item.to}
-                    end={item.end}
-                    className={({ isActive }) =>
-                      clsx("sidebar-link", isActive && "active")
-                    }
-                  >
-                    <span className="flex-1 truncate">{item.label}</span>
-                    {item.countKey && counts[item.countKey] != null && (
-                      <span className="text-[10px] text-muted">
-                        {counts[item.countKey]}
-                      </span>
-                    )}
-                  </NavLink>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </nav>
-
-      <div className="px-3 py-2 border-t border-border text-[10px] text-muted">
-        <span className="inline-block w-2 h-2 rounded-full bg-done mr-1.5" />
-        connected · http://localhost:4455
+      <div style={{
+        borderTop: "1px solid var(--border-0)", padding: "8px var(--pad-x)",
+        fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)",
+        display: "flex", alignItems: "center",
+      }}>
+        <span style={{ marginLeft: "auto" }}>j ↕ · ⏎ open</span>
       </div>
     </aside>
+  );
+}
+
+interface AgentRowProps {
+  agentName: string;
+  stories: Story[];
+}
+
+const AGENT_TASK_LABEL: Record<string, string> = {
+  "spec-writer":  "asking questions",
+  "scrum-master": "planning",
+  "reviewer":     "verifying",
+  "auditor":      "auditing",
+  "__human__":    "awaiting you",
+};
+
+function AgentRow({ agentName, stories }: AgentRowProps) {
+  const isHuman = agentName === "__human__";
+  const { icon, color } = isHuman
+    ? { icon: faUser, color: "var(--ag-human)" }
+    : resolveAgentDisplay(agentName);
+  const label = isHuman ? "you" : agentName;
+  const taskLabel = AGENT_TASK_LABEL[agentName] ?? "working";
+
+  return (
+    <div className="sb-agent" title={stories.map((s) => s.id).join(", ")}>
+      <span className="sb-agent-glyph" style={{ color }}>
+        <FontAwesomeIcon icon={icon} />
+      </span>
+      <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <span className="sb-agent-name">{label}</span>
+        <span className="sb-agent-task">
+          {taskLabel}
+          {!isHuman && (
+            <span className="typing" style={{ marginLeft: 4, color }}>
+              <i /><i /><i />
+            </span>
+          )}
+        </span>
+      </div>
+      <span className="sb-agent-count">{stories.length}</span>
+    </div>
+  );
+}
+
+function SbLink({ icon, name, count, onClick }: { icon: IconDefinition; name: string; count?: number; onClick?: () => void }) {
+  return (
+    <div className="sb-item" onClick={onClick} style={{ cursor: onClick ? "default" : undefined }}>
+      <FontAwesomeIcon icon={icon} style={{ color: "var(--fg-3)", width: 12, flexShrink: 0 }} />
+      <span className="sb-name" style={{ marginLeft: 6 }}>{name}</span>
+      {count != null && <span className="sb-count">{count}</span>}
+    </div>
   );
 }

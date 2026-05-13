@@ -336,7 +336,7 @@ function AuditRowItem({
       </span>
       {r.status !== "forgone" ? (
         <button
-          className="px-2 py-0.5 text-[10px] rounded bg-surface2 border border-border hover:bg-surface3 transition-colors disabled:opacity-50 whitespace-nowrap"
+          className="btn btn-sm"
           onClick={onVerify}
           disabled={isAuditing}
           title="Spawn AI agent to verify this recipe against the codebase"

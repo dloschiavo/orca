@@ -5,7 +5,8 @@
   "type": "module",
   "main": "./src/index.ts",
   "scripts": {
-    "predev": "lsof -ti:4455 | xargs kill -9 2>/dev/null || true",
+    "postinstall": "tsx src/scripts/setup-env.ts",
+    "predev": "tsx src/scripts/setup-env.ts && lsof -ti:4455 | xargs kill -9 2>/dev/null || true",
     "dev": "vite-node --watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",

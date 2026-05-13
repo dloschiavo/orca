@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "orca-web",
-      "runtimeExecutable": "/Users/davidloschiavo/.nvm/versions/node/v20.19.2/bin/node",
+      "runtimeExecutable": "/opt/homebrew/bin/node",
       "runtimeArgs": [
         "/Users/davidloschiavo/Documents/Goliath/orca/apps/web/node_modules/vite/bin/vite.js",
         "--port",

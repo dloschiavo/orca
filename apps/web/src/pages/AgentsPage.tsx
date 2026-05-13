@@ -6,7 +6,7 @@ import type { AgentInvocation } from "../api.js";
 import { PageHeader } from "../components/PageHeader.js";
 import { Breadcrumb } from "../components/Breadcrumb.js";
 import { AVAILABLE_MODELS_FALLBACK, type Agent, type AvailableModel } from "@orca/shared";
-import { agentColors, agentIcon } from "../utils/agentStyle.js";
+import { resolveAgentDisplay } from "../utils/agentStyle.js";
 
 export function AgentsPage() {
   const [showArchived, setShowArchived] = useState(false);
@@ -31,10 +31,10 @@ export function AgentsPage() {
         subtitle={`${activeAgents.length} active${archivedAgents.length > 0 ? `, ${archivedAgents.length} archived` : ""}`}
       />
       {isLoading && (
-        <div className="text-muted text-sm p-6">loading…</div>
+        <div className="p-6 text-sm text-muted">loading…</div>
       )}
       {!isLoading && activeAgents.length === 0 && !showArchived && (
-        <div className="text-muted text-sm p-6">
+        <div className="p-6 text-sm text-muted">
           No agents in the database. The migrator should have seeded
           the canonical list — check the server logs for migration errors.
         </div>
@@ -42,29 +42,22 @@ export function AgentsPage() {
 
       {!isLoading && (
         <div className="flex-1 min-h-0 flex">
-          <aside className="w-[280px] shrink-0 border-r border-border overflow-y-auto flex flex-col">
-            {/* Sidebar toolbar */}
-            <div className="px-3 py-2 border-b border-border flex items-center gap-2 shrink-0">
+          <aside className="w-[260px] shrink-0 overflow-y-auto flex flex-col border-r border-border bg-surface">
+            <div className="px-3 py-2 flex items-center gap-2 shrink-0 border-b border-border">
               <button
                 onClick={() => setShowCreateForm(true)}
-                className="flex-1 text-center text-[11px] px-2 py-1.5 rounded bg-accent/20 text-accent hover:bg-accent/30 transition-colors"
+                className="btn btn-sm btn-primary flex-1"
               >
                 + new agent
               </button>
               <button
                 onClick={() => setShowArchived((v) => !v)}
-                className={`text-[11px] px-2 py-1.5 rounded transition-colors ${
-                  showArchived
-                    ? "bg-muted/30 text-text"
-                    : "bg-transparent text-muted hover:text-text"
-                }`}
-                title="Toggle archived agents"
+                className={`btn btn-sm${showArchived ? " btn-active" : ""}`}
               >
                 archived
               </button>
             </div>
 
-            {/* Active agents */}
             {activeAgents.map((a) => (
               <AgentSidebarRow
                 key={a.id}
@@ -74,10 +67,9 @@ export function AgentsPage() {
               />
             ))}
 
-            {/* Archived agents section */}
             {showArchived && archivedAgents.length > 0 && (
               <>
-                <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-muted bg-surface/50 border-y border-border">
+                <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-muted bg-surface2 border-t border-b border-border">
                   Archived
                 </div>
                 {archivedAgents.map((a) => (
@@ -102,8 +94,8 @@ export function AgentsPage() {
                 }}
               />
             ) : !selected ? (
-              <div className="flex items-center justify-center h-full text-muted text-sm">
-                Select an agent to view details
+              <div className="flex items-center justify-center h-full text-sm font-mono text-muted/50">
+                select an agent
               </div>
             ) : (
               <AgentDetail
@@ -128,36 +120,32 @@ function AgentSidebarRow({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const colors = agentColors(agent.name);
-  const icon = agentIcon(agent.name);
+  const { icon, color } = resolveAgentDisplay(agent.name);
   return (
     <button
       onClick={onSelect}
-      className={`w-full text-left px-4 py-3 border-b border-border transition-colors ${
-        selected
-          ? "bg-text/10 border-l-2 border-l-accent"
-          : "hover:bg-surface border-l-2 border-l-transparent"
+      className={`w-full text-left px-4 py-3 transition-colors border-b border-border border-l-2 ${
+        selected ? "bg-surface2" : "hover:bg-surface2/50"
       } ${agent.archivedAt ? "opacity-50" : ""}`}
+      style={{ borderLeftColor: selected ? color : "transparent" }}
     >
       <div className="flex items-center gap-2">
-        <span className={`inline-flex items-center justify-center w-6 h-6 rounded-full shrink-0 ${colors.bg} ${colors.text}`}>
-          <FontAwesomeIcon icon={icon} className="text-[10px]" />
-        </span>
-        <span className={`font-mono text-[12px] font-medium ${colors.text}`}>
+        <FontAwesomeIcon icon={icon} className="text-[11px] shrink-0 w-3" style={{ color }} />
+        <span className="font-mono text-[12px] font-medium" style={{ color }}>
           {agent.name}
         </span>
         {!agent.isCodeModifying && (
-          <span className="text-[9px] uppercase text-muted">read-only</span>
+          <span className="text-[9px] uppercase text-muted/50">read-only</span>
         )}
         {agent.archivedAt && (
-          <span className="text-[9px] uppercase text-muted">archived</span>
+          <span className="text-[9px] uppercase text-muted/50">archived</span>
         )}
       </div>
-      <div className="text-[11px] text-muted mt-1 whitespace-normal pl-8">
+      <div className="text-[11px] mt-1 pl-8 whitespace-normal text-muted">
         {agent.description}
       </div>
       {agent.model && (
-        <div className="text-[10px] text-muted/60 font-mono mt-0.5 pl-8">
+        <div className="text-[10px] font-mono mt-0.5 pl-8 text-muted/50">
           {agent.model}
         </div>
       )}
@@ -190,37 +178,32 @@ function CreateAgentForm({
   return (
     <div className="p-6 space-y-6 max-w-lg">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-medium text-text">New Agent</h2>
-        <button
-          onClick={onClose}
-          className="text-muted text-sm hover:text-text transition-colors"
-        >
-          cancel
-        </button>
+        <h2 className="text-sm font-semibold text-text">New Agent</h2>
+        <button onClick={onClose} className="btn btn-sm btn-ghost">cancel</button>
       </div>
 
       <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
-          Name <span className="normal-case tracking-normal text-muted/60">(lowercase, hyphens only)</span>
+        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
+          Name <span className="normal-case tracking-normal text-muted/50">(lowercase, hyphens only)</span>
         </label>
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. my-agent"
-          className={`w-full px-3 py-2 border rounded-md text-sm font-mono text-text bg-surface ${
+          className={`w-full px-3 py-2 rounded-md text-sm font-mono outline-none bg-surface text-text border ${
             name && !nameValid ? "border-blocked" : "border-border"
           }`}
         />
         {name && !nameValid && (
-          <div className="text-[11px] text-blocked mt-1">
+          <div className="text-[11px] mt-1 text-blocked">
             Only lowercase letters, numbers, and hyphens allowed.
           </div>
         )}
       </div>
 
       <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
+        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
           Description
         </label>
         <input
@@ -228,7 +211,7 @@ function CreateAgentForm({
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="One-line description of what this agent does"
-          className="w-full px-3 py-2 border border-border rounded-md text-sm text-text bg-surface"
+          className="w-full px-3 py-2 rounded-md text-sm outline-none bg-surface text-text border border-border"
         />
       </div>
 
@@ -240,13 +223,13 @@ function CreateAgentForm({
           onChange={(e) => setIsCodeModifying(e.target.checked)}
           className="rounded"
         />
-        <label htmlFor="isCodeModifying" className="text-sm text-text cursor-pointer">
+        <label htmlFor="isCodeModifying" className="text-sm cursor-pointer text-text/80">
           Code-modifying agent
         </label>
       </div>
 
       {createMutation.isError && (
-        <div className="text-[12px] text-blocked bg-blocked/10 border border-blocked/30 rounded px-3 py-2">
+        <div className="text-[12px] rounded-md px-3 py-2 text-blocked bg-blocked/10 border border-blocked/30">
           {(createMutation.error as Error)?.message ?? "Failed to create agent"}
         </div>
       )}
@@ -254,11 +237,7 @@ function CreateAgentForm({
       <button
         onClick={() => createMutation.mutate()}
         disabled={!name || !nameValid || createMutation.isPending}
-        className={`px-4 py-2 text-sm rounded-md transition-colors ${
-          name && nameValid
-            ? "bg-done text-white hover:bg-done/90"
-            : "bg-text/10 text-muted cursor-not-allowed"
-        }`}
+        className="btn btn-sm btn-primary"
       >
         {createMutation.isPending ? "creating…" : "create agent"}
       </button>
@@ -267,9 +246,6 @@ function CreateAgentForm({
 }
 
 function useAvailableModels(): readonly AvailableModel[] {
-  // Refresh every 10 minutes so a server-side bump shows up without a
-  // manual reload. The server itself polls Anthropic hourly; the UI just
-  // mirrors whatever the server has cached.
   const { data } = useQuery({
     queryKey: ["models"],
     queryFn: () => api.models.list(),
@@ -284,13 +260,11 @@ function ModelSelect({
   onChange,
   defaultLabel,
   dirty,
-  fieldClass,
 }: {
   value: string;
   onChange: (v: string) => void;
   defaultLabel: string;
   dirty: boolean;
-  fieldClass: (dirty: boolean) => string;
 }) {
   const models = useAvailableModels();
   const knownIds = models.map((m) => m.id);
@@ -299,7 +273,9 @@ function ModelSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={`w-full px-3 py-2 border rounded-md text-sm text-text font-mono ${fieldClass(dirty)}`}
+      className={`w-full px-3 py-2 rounded-md text-sm font-mono outline-none bg-surface text-text border ${
+        dirty ? "border-done/50 ring-1 ring-done/20" : "border-border"
+      }`}
     >
       <option value="">{defaultLabel}</option>
       {models.map((m) => (
@@ -321,9 +297,6 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
   const [modelDraft, setModelDraft] = useState(agent.model ?? "");
   const [fastModelDraft, setFastModelDraft] = useState(agent.fastModel ?? "");
 
-  // Prompt sections live in <repo>/prompts/<agent>.md as a single file
-  // split on [SYSTEM] / [MAIN]. The save endpoint writes both at once;
-  // git owns history.
   const { data: promptData } = useQuery({
     queryKey: ["agent-prompt", agentName],
     queryFn: () => api.agents.getPrompt(agentName),
@@ -372,48 +345,37 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
 
   const archiveMutation = useMutation({
     mutationFn: () => api.agents.archive(agentName),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["agents"] });
-    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["agents"] }); },
   });
 
   const unarchiveMutation = useMutation({
     mutationFn: () => api.agents.unarchive(agentName),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["agents"] });
-    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["agents"] }); },
   });
 
   const isArchived = agent.archivedAt !== null;
 
-  // Field-level dirty helpers
   const fieldClass = (dirty: boolean) =>
-    dirty
-      ? "bg-surface border-done/50 ring-1 ring-done/20"
-      : "bg-surface border-border";
+    dirty ? "border-done/50 ring-1 ring-done/20" : "border-border";
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Header + save */}
+    <div className="p-6 space-y-6 max-w-3xl">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           {(() => {
-            const colors = agentColors(agentName);
-            const icon = agentIcon(agentName);
+            const { icon, color } = resolveAgentDisplay(agentName);
             return (
-              <span className={`inline-flex items-center justify-center w-10 h-10 rounded-full shrink-0 ${colors.bg} ${colors.text}`}>
-                <FontAwesomeIcon icon={icon} className="text-lg" />
-              </span>
+              <FontAwesomeIcon icon={icon} className="text-xl shrink-0" style={{ color }} />
             );
           })()}
           <div>
-            <h2 className={`text-lg font-medium font-mono ${agentColors(agentName).text}`}>{agentName}</h2>
-            <div className="text-[11px] text-muted mt-0.5">
+            <h2 className="text-sm font-semibold font-mono" style={{ color: resolveAgentDisplay(agentName).color }}>
+              {agentName}
+            </h2>
+            <div className="text-[11px] mt-0.5 text-muted">
               v{agent.version}
               {agent.isCodeModifying ? " · code-modifying" : " · read-only"}
-              {isArchived && (
-                <span className="ml-2 text-blocked">· archived</span>
-              )}
+              {isArchived && <span className="text-blocked"> · archived</span>}
             </div>
           </div>
         </div>
@@ -422,7 +384,7 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
             <button
               onClick={() => unarchiveMutation.mutate()}
               disabled={unarchiveMutation.isPending}
-              className="px-3 py-2 text-sm rounded-md bg-done/20 text-done hover:bg-done/30 transition-colors"
+              className="btn btn-sm"
             >
               {unarchiveMutation.isPending ? "restoring…" : "unarchive"}
             </button>
@@ -430,7 +392,7 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
             <button
               onClick={() => archiveMutation.mutate()}
               disabled={archiveMutation.isPending}
-              className="px-3 py-2 text-sm rounded-md bg-text/10 text-muted hover:bg-blocked/20 hover:text-blocked transition-colors"
+              className="btn btn-sm btn-danger"
             >
               {archiveMutation.isPending ? "archiving…" : "archive"}
             </button>
@@ -438,34 +400,28 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
           <button
             onClick={() => saveMutation.mutate()}
             disabled={!isDirty || saveMutation.isPending}
-            className={`px-4 py-2 text-sm rounded-md transition-colors ${
-              isDirty
-                ? "bg-done text-white hover:bg-done/90"
-                : "bg-text/10 text-muted cursor-not-allowed"
-            }`}
+            className="btn btn-sm btn-primary"
           >
             {saveMutation.isPending ? "saving…" : "save"}
           </button>
         </div>
       </div>
 
-      {/* Description */}
       <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
+        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
           Description
         </label>
         <input
           type="text"
           value={descDraft}
           onChange={(e) => setDescDraft(e.target.value)}
-          className={`w-full px-3 py-2 border rounded-md text-sm text-text ${fieldClass(descDraft !== agent.description)}`}
+          className={`w-full px-3 py-2 rounded-md text-sm outline-none bg-surface text-text border ${fieldClass(descDraft !== agent.description)}`}
         />
       </div>
 
-      {/* Model + Fast Model */}
       <div className="flex gap-4">
         <div className="flex-1">
-          <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
+          <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
             Model
           </label>
           <ModelSelect
@@ -473,11 +429,10 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
             onChange={setModelDraft}
             defaultLabel="(default)"
             dirty={modelDraft !== (agent.model ?? "")}
-            fieldClass={fieldClass}
           />
         </div>
         <div className="flex-1">
-          <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
+          <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
             Fast Model
           </label>
           <ModelSelect
@@ -485,62 +440,58 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
             onChange={setFastModelDraft}
             defaultLabel="(none)"
             dirty={fastModelDraft !== (agent.fastModel ?? "")}
-            fieldClass={fieldClass}
           />
         </div>
       </div>
 
-      {/* Cached System Prompt — backed by [SYSTEM] section of prompts/<agent>.md */}
       <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
+        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
           Cached System Prompt
-          <span className="ml-2 normal-case tracking-normal text-muted/60">
+          <span className="ml-2 normal-case tracking-normal text-muted/50">
             ({effectiveSystemDraft.length.toLocaleString()} chars · cached)
           </span>
         </label>
         {!promptData ? (
-          <div className="text-muted text-[12px]">loading…</div>
+          <div className="text-[12px] text-muted">loading…</div>
         ) : (
           <textarea
             value={effectiveSystemDraft}
             onChange={(e) => setSystemDraft(e.target.value)}
             placeholder="Agent instructions, directives, static context… Cached by Claude across all stories using this agent."
-            className={`w-full min-h-[200px] px-3 py-2 border rounded-md text-[12px] font-mono text-text resize-y leading-relaxed ${fieldClass(effectiveSystemDraft !== fileSystem)}`}
+            className={`w-full min-h-[200px] px-3 py-2 rounded-md text-[12px] font-mono resize-y leading-relaxed outline-none bg-surface text-text border ${fieldClass(effectiveSystemDraft !== fileSystem)}`}
           />
         )}
       </div>
 
-      {/* Uncached Prompt — backed by [MAIN] section of prompts/<agent>.md */}
       <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
+        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
           Uncached Prompt
-          <span className="ml-2 normal-case tracking-normal">
+          <span className="ml-2 normal-case tracking-normal text-muted/50">
             ({effectiveMainDraft.length.toLocaleString()} chars)
           </span>
         </label>
         {!promptData ? (
-          <div className="text-muted text-[12px]">loading…</div>
+          <div className="text-[12px] text-muted">loading…</div>
         ) : (
           <textarea
             value={effectiveMainDraft}
             onChange={(e) => setMainDraft(e.target.value)}
             placeholder="Story-specific context: {story.title}, {story.spec}, {story.id}…"
-            className={`w-full min-h-[300px] px-3 py-2 border rounded-md text-[12px] font-mono text-text resize-y leading-relaxed ${fieldClass(effectiveMainDraft !== fileMain)}`}
+            className={`w-full min-h-[300px] px-3 py-2 rounded-md text-[12px] font-mono resize-y leading-relaxed outline-none bg-surface text-text border ${fieldClass(effectiveMainDraft !== fileMain)}`}
           />
         )}
       </div>
 
-      <div className="text-[10px] text-muted/60 font-mono">
+      <div className="text-[10px] font-mono text-muted/50">
         File: prompts/{agentName}.md · saves write the file directly · git owns history
       </div>
 
-      {/* Invocation log */}
       <InvocationLog agentName={agentName} />
     </div>
   );
 }
 
-const INVOCATION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes; swap for agent.llmTimeoutMs when that field exists
+const INVOCATION_TIMEOUT_MS = 10 * 60 * 1000;
 
 function InvocationLog({ agentName }: { agentName: string }) {
   const qc = useQueryClient();
@@ -554,21 +505,19 @@ function InvocationLog({ agentName }: { agentName: string }) {
 
   const cancelMutation = useMutation({
     mutationFn: (storyId: string) => api.stories.stop(storyId),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["agent-invocations", agentName] });
-    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["agent-invocations", agentName] }); },
   });
 
   return (
     <div>
-      <label className="text-[11px] uppercase tracking-wider text-muted block mb-2">
+      <div className="text-[10.5px] uppercase tracking-wider mb-3 text-muted">
         Invocation log ({invocations.length})
-      </label>
+      </div>
       {isLoading && (
-        <div className="text-muted text-[12px]">loading…</div>
+        <div className="text-[12px] text-muted">loading…</div>
       )}
       {!isLoading && invocations.length === 0 && (
-        <div className="text-muted text-sm py-4 border border-dashed border-border rounded-md text-center">
+        <div className="text-sm py-6 text-center rounded-md text-muted border border-dashed border-border">
           No invocations recorded yet.
         </div>
       )}
@@ -620,39 +569,39 @@ function InvocationRow({
     return () => document.removeEventListener("mousedown", handler);
   }, [menuOpen]);
 
-  // Actions cluster — stopPropagation so clicks here don't bubble to the
-  // collapsed-header button and accidentally toggle expand/collapse.
+  const resultClass = (r: string) => {
+    if (r === "pass" || r === "clear" || r === "ok") return "bg-done/20 text-done";
+    if (r === "fail" || r === "error" || r === "spawn_error") return "bg-blocked/20 text-blocked";
+    return "bg-surface2 text-muted";
+  };
+
   const actions = (
-    <div
-      className="flex items-center gap-1 shrink-0"
-      onClick={(e) => e.stopPropagation()}
-    >
-      {/* Context menu */}
+    <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen((v) => !v)}
-          className="w-6 h-6 flex items-center justify-center text-muted hover:text-text rounded hover:bg-text/10 transition-colors text-[15px] leading-none"
+          className="w-6 h-6 flex items-center justify-center rounded transition-colors text-[15px] leading-none text-muted hover:text-text"
           title="Actions"
         >
           ⋮
         </button>
         {menuOpen && (
-          <div className="absolute right-0 top-full z-50 mt-1 bg-surface border border-border rounded shadow-lg min-w-[120px] py-1">
+          <div className="absolute right-0 top-full z-50 mt-1 rounded-md shadow-lg min-w-[120px] py-1 bg-surface2 border border-border">
             <button
               onClick={() => { onCancel(); setMenuOpen(false); }}
-              className="w-full text-left px-3 py-1.5 text-[12px] text-blocked hover:bg-text/5 transition-colors"
+              className="w-full text-left px-3 py-1.5 text-[12px] transition-colors text-blocked hover:bg-surface"
             >
               Cancel
             </button>
           </div>
         )}
       </div>
-      {/* Tick — collapses the row; only shown when expanded */}
       {expanded && (
         <button
           onClick={onToggle}
           title="Collapse"
-          className="w-6 h-6 flex items-center justify-center text-done hover:text-done/70 rounded hover:bg-done/10 transition-colors text-[14px]"
+          className="w-6 h-6 flex items-center justify-center rounded transition-colors text-[14px]"
+          style={{ color: "var(--ag-impl)" }}
         >
           ✓
         </button>
@@ -663,27 +612,22 @@ function InvocationRow({
   const headerInner = (
     <>
       {!expanded && (
-        <span className="text-muted text-[10px]">▶</span>
+        <span className="text-[10px] text-muted/50">▶</span>
       )}
       <span className="text-[10px] font-mono text-muted/50">{inv.id.slice(0, 8)}</span>
-      <span className="text-[11px] text-muted font-mono">
+      <span className="text-[11px] font-mono text-muted">
         {ts.toLocaleDateString()} {ts.toLocaleTimeString()}
       </span>
       <a
         href={`/stories/${inv.storyId}`}
         onClick={(e) => e.stopPropagation()}
-        className="text-[11px] text-accent hover:underline font-mono"
+        className="text-[11px] font-mono hover:underline"
+        style={{ color: "var(--ag-impl)" }}
       >
         {inv.storyId.slice(0, 8)}
       </a>
       {result && (
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-          result === "pass" || result === "clear" || result === "ok"
-            ? "bg-done/20 text-done"
-            : result === "fail" || result === "error" || result === "spawn_error"
-              ? "bg-blocked/20 text-blocked"
-              : "bg-muted/20 text-muted"
-        }`}>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${resultClass(result)}`}>
           {result}
         </span>
       )}
@@ -694,10 +638,10 @@ function InvocationRow({
       )}
       <div className="ml-auto flex items-center gap-2 shrink-0">
         {elapsed !== null && (
-          <span className="text-[10px] text-muted">{elapsed}s</span>
+          <span className="text-[10px] font-mono text-muted">{elapsed}s</span>
         )}
         {!hasResponse && !isTimedOut && (
-          <span className="text-[10px] text-muted/50 italic">pending…</span>
+          <span className="text-[10px] italic text-muted/50">pending…</span>
         )}
         {actions}
       </div>
@@ -705,58 +649,54 @@ function InvocationRow({
   );
 
   return (
-    <div className="border border-border rounded-md overflow-hidden">
-      {/* Collapsed: entire header row is the expand trigger.
-          Expanded: plain div — only the ✓ tick button collapses. */}
+    <div className="rounded-md overflow-hidden border border-border">
       {expanded ? (
-        <div className="px-4 py-2.5 bg-text/5 flex items-center gap-3">
+        <div className="px-4 py-2.5 flex items-center gap-3 bg-surface">
           {headerInner}
         </div>
       ) : (
         <button
           onClick={onToggle}
-          className="w-full text-left px-4 py-2.5 bg-text/5 hover:bg-text/10 transition-colors flex items-center gap-3"
+          className="w-full text-left px-4 py-2.5 flex items-center gap-3 transition-colors bg-surface hover:bg-surface2"
         >
           {headerInner}
         </button>
       )}
       {expanded && (
-        <div className="border-t border-border flex min-h-[200px]">
-          <div className="flex-1 border-r border-border flex flex-col min-w-0">
-            <div className="px-3 py-1.5 bg-text/5 text-[10px] uppercase tracking-wider text-muted border-b border-border">
+        <div className="flex min-h-[200px] border-t border-border">
+          <div className="flex-1 flex flex-col min-w-0 border-r border-border">
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider bg-surface text-muted border-b border-border">
               Request
             </div>
             <div className="flex-1 overflow-auto max-h-[400px]">
               {inv.systemPrompt && (
                 <div className="border-b border-border">
-                  <div className="px-3 py-1 bg-text/[0.03] text-[10px] uppercase tracking-wider text-muted/70">
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider bg-surface text-muted/50">
                     System prompt
                   </div>
-                  <pre className="px-3 py-2 text-[11px] font-mono text-muted whitespace-pre-wrap break-words">
+                  <pre className="px-3 py-2 text-[11px] font-mono whitespace-pre-wrap break-words text-muted">
                     {inv.systemPrompt}
                   </pre>
                 </div>
               )}
               <div>
                 {inv.systemPrompt && (
-                  <div className="px-3 py-1 bg-text/[0.03] text-[10px] uppercase tracking-wider text-muted/70">
+                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider bg-surface text-muted/50">
                     Main prompt
                   </div>
                 )}
-                <pre className="px-3 py-2 text-[11px] font-mono text-text whitespace-pre-wrap break-words">
+                <pre className="px-3 py-2 text-[11px] font-mono whitespace-pre-wrap break-words text-text/80">
                   {inv.prompt}
                 </pre>
               </div>
             </div>
           </div>
           <div className="flex-1 flex flex-col min-w-0">
-            <div className="px-3 py-1.5 bg-text/5 text-[10px] uppercase tracking-wider text-muted border-b border-border">
+            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider bg-surface text-muted border-b border-border">
               Response
             </div>
-            <pre className="flex-1 p-3 text-[11px] font-mono text-text whitespace-pre-wrap break-words overflow-auto max-h-[400px]">
-              {inv.response
-                ? formatResponse(inv.response)
-                : "(awaiting response)"}
+            <pre className="flex-1 p-3 text-[11px] font-mono whitespace-pre-wrap break-words overflow-auto max-h-[400px] text-text/80">
+              {inv.response ? formatResponse(inv.response) : "(awaiting response)"}
             </pre>
           </div>
         </div>

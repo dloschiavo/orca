@@ -148,11 +148,7 @@ function ProjectDetail({
           <button
             onClick={handleSave}
             disabled={!isDirty || isSaving}
-            className={`px-4 py-2 text-sm rounded-md transition-colors ${
-              isDirty
-                ? "bg-done text-white hover:bg-done/90"
-                : "bg-text/10 text-muted cursor-not-allowed"
-            }`}
+            className="btn btn-primary"
           >
             {isSaving ? "Saving…" : "Save"}
           </button>
@@ -213,7 +209,7 @@ function ProjectDetail({
             Server endpoints
           </label>
           <button
-            className="btn btn-sm text-xs"
+            className="btn btn-sm"
             onClick={() => detectMut.mutate()}
             disabled={detectMut.isPending}
           >
@@ -241,7 +237,7 @@ function ProjectDetail({
                   </span>
                   {!running && (
                     <button
-                      className="btn btn-sm text-[10px]"
+                      className="btn btn-sm"
                       onClick={() => startMut.mutate(ep.kind)}
                       disabled={startMut.isPending}
                     >
@@ -261,7 +257,7 @@ function ProjectDetail({
           Danger zone
         </label>
         <button
-          className="px-3 py-1.5 text-sm text-red-400 border border-red-400/30 rounded-md hover:bg-red-400/10 transition-colors"
+          className="btn btn-sm btn-danger"
           disabled={removeMut.isPending}
           onClick={() => {
             if (confirm(`Remove "${project.name}" from orca? (No files will be deleted.)`))

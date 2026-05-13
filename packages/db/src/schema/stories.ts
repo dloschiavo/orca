@@ -126,6 +126,11 @@ export const stories = pgTable(
     // only files whose mtime > firstBacklogAt are shown, so the list
     // reflects this story's work and not the entire repo history.
     firstBacklogAt: timestamp("first_backlog_at", { withTimezone: true }),
+    // Snapshot of the human-authored title and spec captured at story
+    // creation, before the spec-writer agent rewrites them. Shown on the
+    // "Original" archive tab so the user can compare the before/after.
+    originalTitle: text("original_title"),
+    originalSpecMd: text("original_spec_md"),
   },
   (table) => ({
     projectStatusIdx: index("stories_project_status_idx").on(

@@ -69,18 +69,34 @@ DO $$ BEGIN
 END $$;
 
 -- Rename agent names: frontend-implementor → frontend, backend-implementor → backend
-UPDATE agents SET name = 'frontend' WHERE name = 'frontend-implementor';
-UPDATE agents SET name = 'backend'  WHERE name = 'backend-implementor';
-UPDATE stories SET agent = 'frontend' WHERE agent = 'frontend-implementor';
-UPDATE stories SET agent = 'backend'  WHERE agent = 'backend-implementor';
-UPDATE project_rider_sections SET agent_name = 'frontend' WHERE agent_name = 'frontend-implementor';
-UPDATE project_rider_sections SET agent_name = 'backend'  WHERE agent_name = 'backend-implementor';
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'agents' AND relkind = 'r') THEN
+    UPDATE agents SET name = 'frontend' WHERE name = 'frontend-implementor';
+    UPDATE agents SET name = 'backend'  WHERE name = 'backend-implementor';
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'stories' AND relkind = 'r') THEN
+    UPDATE stories SET agent = 'frontend' WHERE agent = 'frontend-implementor';
+    UPDATE stories SET agent = 'backend'  WHERE agent = 'backend-implementor';
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'project_rider_sections' AND relkind = 'r') THEN
+    UPDATE project_rider_sections SET agent_name = 'frontend' WHERE agent_name = 'frontend-implementor';
+    UPDATE project_rider_sections SET agent_name = 'backend'  WHERE agent_name = 'backend-implementor';
+  END IF;
+END $$;
 
 -- Migrate finding destinations: archetype-prompt → agent-prompt, archetype-model → agent-model
-UPDATE findings SET destination = jsonb_set(destination, '{kind}', '"agent-prompt"')
-  WHERE destination->>'kind' = 'archetype-prompt';
-UPDATE findings SET destination = jsonb_set(destination, '{kind}', '"agent-model"')
-  WHERE destination->>'kind' = 'archetype-model';
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'findings' AND relkind = 'r') THEN
+    UPDATE findings SET destination = jsonb_set(destination, '{kind}', '"agent-prompt"')
+      WHERE destination->>'kind' = 'archetype-prompt';
+    UPDATE findings SET destination = jsonb_set(destination, '{kind}', '"agent-model"')
+      WHERE destination->>'kind' = 'archetype-model';
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS projects (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -344,6 +360,7 @@ CREATE TABLE IF NOT EXISTS activity_events (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS activity_events_story_created_idx ON activity_events(story_id, created_at);
+CREATE INDEX IF NOT EXISTS activity_events_dispatch_instance_idx ON activity_events(story_id, dispatch_instance_id) WHERE dispatch_instance_id IS NOT NULL;
 
 -- Vocabulary migrations. Idempotent — re-running is a no-op once applied.
 -- Story: 'refinement' folded into 'backlog' (agile-standard "committed but
@@ -470,6 +487,7 @@ VALUES
   ('ui-polisher',    1, 'Visual polish, match-the-design.',               true),
   ('refactorer',     1, 'No behavioral change; rename/move/extract.',     true),
   ('test-writer',    1, 'Adds or repairs tests.',                         true),
+  ('qa-tester',      1, 'Tests implementation against spec requirements.', false),
   ('reviewer',       1, 'QA gate after each completed dispatch.',         false),
   ('explorer',       1, 'Pure research — no edits permitted.',            false),
   ('classifier',     1, 'Routes every finding to an upstream cause.',     false),

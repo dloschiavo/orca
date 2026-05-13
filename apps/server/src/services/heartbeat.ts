@@ -400,23 +400,22 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
     );
   } else {
     // Automated statuses — heartbeat dispatches the assigned agent for these.
-    //   `icebox`       = committed but not yet specced → spec-writer.
-    //   `planning`     = spec-writer owns the back-and-forth with the user;
-    //                    re-pick on each tick so it can incorporate answers.
-    //   `backlog`      = spec complete, ready for implementing agent.
-    //   `qa`           = implementing finished, qa-tester is next.
-    // `review` is intentionally excluded — it's a human gate, not an
-    // automation state. `implementing`, `done`, `canceled`, `blocked` are
-    // never picked up here. Agents can still hand off explicitly via POST
-    // /api/stories/:id/wake to skip the next heartbeat interval.
+    //   `planning`      = spec-writer owns the back-and-forth with the user;
+    //                     re-pick on each tick so it can incorporate answers.
+    //   `backlog`       = legacy; kept for backward compat with existing rows.
+    //   `implementing`  = spec complete; assigned agent works the story.
+    //   `qa`            = implementing finished, qa-tester is next.
+    // `icebox` is intentionally excluded — it means uncommitted; heartbeat
+    // does not dispatch for iceboxed stories.
+    // `review` is a human gate. `done`, `canceled`, `blocked` are terminal.
     const openStoriesRaw = await db
       .select()
       .from(schema.stories)
       .where(
         inArray(schema.stories.status, [
-          "icebox",
           "planning",
           "backlog",
+          "implementing",
           "qa",
         ] as StoryStatus[]),
       );
@@ -657,9 +656,9 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
         );
 
         // Heartbeat does NOT change status. The agent owns its own status
-        // transitions: spec-writer sets `planning`, frontend/backend set
-        // `implementing`, qa-tester stays in `qa`, etc. All heartbeat does
-        // here is bump dispatchedAt (purely informational) and spawn.
+        // transitions: spec-writer flips planning → implementing on handoff,
+        // qa-tester stays in `qa`, etc. All heartbeat does here is bump
+        // dispatchedAt (purely informational) and spawn.
         await db
           .update(schema.stories)
           .set({

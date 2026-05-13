@@ -120,7 +120,7 @@ export function AddProjectPage() {
               }}
             />
             <button
-              className="btn btn-sm btn-primary text-xs shrink-0"
+              className="btn btn-sm btn-primary shrink-0"
               disabled={
                 !companyRootInput.trim() ||
                 setCompanyRootMut.isPending ||
@@ -143,7 +143,7 @@ export function AddProjectPage() {
                 <li key={dir} className="flex items-center gap-2">
                   <span className="flex-1 text-[11px] text-text truncate">{dir}</span>
                   <button
-                    className="btn btn-sm btn-primary text-[10px] shrink-0"
+                    className="btn btn-sm btn-primary shrink-0"
                     disabled={promoteMut.isPending}
                     onClick={() => promoteMut.mutate(dir)}
                   >

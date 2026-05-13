@@ -20,6 +20,10 @@ import { extractModelFromStreamResult, extractModelFromCliWrapper } from "../ser
 import { handleDispatchRejection } from "../services/dispatch-rejection.js";
 import { storyEvents } from "../services/story-events.js";
 
+// CLAUDE_BIN is written to apps/server/.env.local by setup-env.ts (runs on
+// postinstall / predev) and loaded into process.env by index.ts before main().
+const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
+
 // Track running agent processes so we can interrupt them when a story is edited
 // mid-dispatch. Key = storyId.
 // Stored on globalThis so vite-node hot-module reloads don't reset the Map —
@@ -155,7 +159,7 @@ const createStorySchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().min(1),
   specMd: z.string().default(""),
-  status: z.enum(["icebox", "planning", "backlog"]).default("backlog"),
+  status: z.enum(["icebox", "planning", "backlog"]).default("planning"),
   agent: z.string().optional(),
   parentStoryId: z.string().uuid().nullable().optional(),
   labels: z.array(z.string()).optional(),
@@ -290,6 +294,8 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         projectId: body.projectId,
         title: body.title,
         specMd: body.specMd,
+        originalTitle: body.title,
+        originalSpecMd: body.specMd,
         status: body.status,
         agent: body.agent ?? "spec-writer",
         ...(body.parentStoryId !== undefined
@@ -635,8 +641,9 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     // current agent's work is done. Distinct from "starting" transitions:
     //
     //   FINISHING transitions (kill the current process — it's done):
-    //     → backlog    (spec-writer or qa-tester handing off)
-    //     → qa         (implementing agent handing off to qa-tester)
+    //     → implementing  (spec-writer handing off to assigned agent)
+    //     → backlog       (legacy; kept for backward compat)
+    //     → qa            (implementing agent handing off to qa-tester)
     //     → review     (qa-tester handing off to human)
     //     → blocked / done / canceled (terminal)
     //     agent changed (handoff to a different agent)
@@ -1168,7 +1175,7 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
   const {
     db,
     storyId,
-    repoPath,
+    repoPath: rawRepoPath,
     title,
     specMd,
     changeSummary,
@@ -1177,6 +1184,12 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
     trigger,
     revertStatusOnDrop,
   } = args;
+
+  // Expand leading ~ so spawn's cwd works even when repoPath was stored with
+  // a tilde shorthand. Node's spawn passes cwd directly to the OS — no shell
+  // expansion — so an unexpanded ~ becomes a literal path that doesn't exist,
+  // causing a confusing ENOENT error on the binary rather than the cwd.
+  const repoPath = rawRepoPath.replace(/^~($|\/)/, `${homedir()}$1`);
 
   // Per-lifecycle UUID. Stamped on every activity event this dispatch
   // emits so the dispatch-claim guard below can identify "another thread"
@@ -1774,6 +1787,8 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   // ChildProcess handle does not survive a Node restart — only the PID does).
   // The exit waiter below branches on this.
   let child: ChildProcess | null;
+  // Resolved when the fresh-spawn child exits or errors. Null for adoption.
+  let exitCodePromise: Promise<number | null> | null = null;
   // Effective PID we're tailing — either child.pid for a fresh spawn, or
   // the PID we're adopting from a prior Node process.
   let dispatchPid: number | null;
@@ -1862,7 +1877,7 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     const errFd = openSync(stderrPath, "w");
     let spawned: ChildProcess;
     try {
-      spawned = spawn("claude", claudeArgs, {
+      spawned = spawn(CLAUDE_BIN, claudeArgs, {
         cwd: repoPath,
         env: doerEnv,
         detached: true,
@@ -1881,6 +1896,24 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     spawned.unref();
     child = spawned;
     dispatchPid = spawned.pid ?? null;
+
+    // Register exit/error listeners synchronously before any await so that
+    // near-instant exits (bad cwd, missing binary, auth failure) are never
+    // missed. If the process exits before we reach the await below, the
+    // promise is already resolved and awaiting it returns immediately.
+    exitCodePromise = new Promise<number | null>((resolve) => {
+      let resolved = false;
+      const finish = (code: number | null) => {
+        if (resolved) return;
+        resolved = true;
+        resolve(code);
+      };
+      spawned.once("exit", (code) => finish(code));
+      spawned.once("error", async (err) => {
+        await logEvent("agent_error", { message: String(err) });
+        finish(null);
+      });
+    });
 
     runningDispatches.set(storyId, spawned);
 
@@ -2449,14 +2482,10 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
       resolved = true;
       resolve(code);
     };
-    if (child) {
-      // Fresh-spawn case: the OS hands us the actual exit code via the
-      // "exit" event on the ChildProcess handle.
-      child.once("exit", (code) => finish(code));
-      child.once("error", async (err) => {
-        await logEvent("agent_error", { message: String(err) });
-        finish(null);
-      });
+    if (exitCodePromise) {
+      // Fresh-spawn case: listeners were registered synchronously right after
+      // spawn so no exit event is ever lost, even for near-instant failures.
+      exitCodePromise.then(finish);
     }
     const tick = async () => {
       try {

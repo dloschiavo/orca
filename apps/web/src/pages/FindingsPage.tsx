@@ -160,7 +160,7 @@ function FindingRow({ finding }: { finding: EnrichedFinding }) {
             <button
               onClick={() => dismissMutation.mutate()}
               disabled={dismissMutation.isPending}
-              className="btn text-xs"
+              className="btn btn-sm"
             >
               {dismissMutation.isPending ? "dismissing…" : "dismiss"}
             </button>

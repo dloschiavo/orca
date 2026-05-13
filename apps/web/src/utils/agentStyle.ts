@@ -1,41 +1,35 @@
 import {
   faUser, faDatabase, faDesktop, faDraftingCompass, faBug,
   faPen, faMap, faSitemap, faGear, faRobot, faCompass, faClipboardList,
+  faBroom, faWrench, faVial, faMagnifyingGlass, faBoxArchive, faShield,
 } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 
 export const USER_LABEL = "david";
 
-export type ActorColors = { text: string; bg: string };
+export type AgentDisplay = { icon: IconDefinition; color: string };
 
-export function agentColors(name: string): ActorColors {
-  const n = (name || "").toLowerCase();
-  if (n === USER_LABEL || n === "user")           return { text: "text-blue-400",    bg: "bg-blue-500/25" };
-  if (n.includes("triage"))                       return { text: "text-purple-400",  bg: "bg-purple-500/25" };
-  if (n.includes("architect"))                    return { text: "text-orange-400",  bg: "bg-orange-500/25" };
-  if (n.includes("backend"))                      return { text: "text-green-400",   bg: "bg-green-500/25" };
-  if (n.includes("frontend"))                     return { text: "text-cyan-400",    bg: "bg-cyan-500/25" };
-  if (n.includes("qa"))                           return { text: "text-red-400",     bg: "bg-red-500/25" };
-  if (n.includes("spec"))                         return { text: "text-yellow-400",  bg: "bg-yellow-500/25" };
-  if (n.includes("explor"))                       return { text: "text-emerald-400", bg: "bg-emerald-500/25" };
-  if (n.includes("compass") || n.includes("nav")) return { text: "text-sky-400",     bg: "bg-sky-500/25" };
-  if (n.includes("plan") || n.includes("list"))   return { text: "text-amber-400",   bg: "bg-amber-500/25" };
-  if (n.includes("system") || !name)              return { text: "text-muted",       bg: "bg-surface2" };
-  return { text: "text-slate-400", bg: "bg-slate-500/25" };
-}
+const KNOWN_AGENTS: Record<string, AgentDisplay> = {
+  "scrum-master": { icon: faSitemap,         color: "var(--ag-scrum)"      },
+  "spec-writer":  { icon: faPen,             color: "var(--ag-spec)"       },
+  "architect":    { icon: faDraftingCompass, color: "var(--ag-architect)"  },
+  "frontend":     { icon: faDesktop,         color: "var(--ag-frontend)"   },
+  "backend":      { icon: faDatabase,        color: "var(--ag-backend)"    },
+  "scraper":      { icon: faCompass,         color: "var(--ag-scraper)"    },
+  "ui-polisher":  { icon: faBroom,           color: "var(--ag-polisher)"   },
+  "refactorer":   { icon: faWrench,          color: "var(--ag-refactor)"   },
+  "test-writer":  { icon: faVial,            color: "var(--ag-test)"       },
+  "reviewer":     { icon: faMap,             color: "var(--ag-reviewer)"   },
+  "explorer":     { icon: faMagnifyingGlass, color: "var(--ag-explorer)"   },
+  "classifier":   { icon: faClipboardList,   color: "var(--ag-classifier)" },
+  "compactor":    { icon: faBoxArchive,      color: "var(--ag-compactor)"  },
+  "auditor":      { icon: faShield,          color: "var(--ag-auditor)"    },
+  "qa-tester":    { icon: faBug,             color: "var(--ag-qa)"         },
+};
 
-export function agentIcon(name: string): IconDefinition {
-  const n = (name || "").toLowerCase();
-  if (n === USER_LABEL || n === "user") return faUser;
-  if (n.includes("backend"))   return faDatabase;
-  if (n.includes("frontend"))  return faDesktop;
-  if (n.includes("architect")) return faDraftingCompass;
-  if (n.includes("qa"))        return faBug;
-  if (n.includes("spec"))      return faPen;
-  if (n.includes("explor"))    return faMap;
-  if (n.includes("triage"))    return faSitemap;
-  if (n.includes("system"))    return faGear;
-  if (n.includes("compass") || n.includes("nav")) return faCompass;
-  if (n.includes("plan") || n.includes("list"))   return faClipboardList;
-  return faRobot;
+export function resolveAgentDisplay(name: string): AgentDisplay {
+  if (!name || name === "user" || name === USER_LABEL) {
+    return { icon: faUser, color: "var(--ag-human)" };
+  }
+  return KNOWN_AGENTS[name] ?? { icon: faRobot, color: "var(--ag-impl)" };
 }

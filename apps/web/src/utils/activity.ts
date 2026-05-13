@@ -173,7 +173,7 @@ export function renderEvent(e: ActivityEvent, full = false): string {
     case "dispatch_completed": {
       const parts: string[] = [];
       if (p.exitCode) parts.push(`exit ${p.exitCode}`);
-      parts.push(`${p.fileCount ?? 0} files changed`);
+      if (p.fileCount) parts.push(`${p.fileCount} files changed`);
       if (p.model) parts.push(`model: ${p.model as string}`);
       if (typeof p.totalCostUsd === "number") parts.push(`$${p.totalCostUsd.toFixed(4)}`);
       if (typeof p.totalTokensUsed === "number") parts.push(formatTokens(p.totalTokensUsed));

@@ -16,6 +16,10 @@ export default defineConfig({
         target: "http://localhost:4455",
         changeOrigin: true,
       },
+      "/health": {
+        target: "http://localhost:4455",
+        changeOrigin: true,
+      },
     },
   },
 });

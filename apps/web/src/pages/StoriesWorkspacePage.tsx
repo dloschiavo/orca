@@ -1,20 +1,13 @@
-import React, { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faEllipsis } from "@fortawesome/free-solid-svg-icons";
-import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ActivityEvent } from "../api.js";
 import type { RefinementQuestion, Story, StoryStatus } from "@orca/shared";
-import { PageHeader } from "../components/PageHeader.js";
-import { Breadcrumb } from "../components/Breadcrumb.js";
-import { StatusDot } from "../components/StatusDot.js";
-import { Section } from "../components/Section.js";
 import { NewStoryModal } from "../components/NewStoryModal.js";
 import { useProjectContext } from "../state/ProjectContext.js";
 import { useStoryEventStream } from "../hooks/useStoryEventStream.js";
-import { USER_LABEL, agentColors, agentIcon, type ActorColors } from "../utils/agentStyle.js";
-import { formatElapsed, formatTokens, tokenHeatColor } from "../utils/formatters.js";
+import { USER_LABEL, resolveAgentDisplay } from "../utils/agentStyle.js";
+import { formatElapsed } from "../utils/formatters.js";
 import {
   renderEvent,
   shortenHome,
@@ -23,91 +16,89 @@ import {
   parseDiffStats,
 } from "../utils/activity.js";
 import { renderMarkdown, parseInlineMarkdown, maybePrettyJson } from "../utils/markdown.js";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faEllipsis } from "@fortawesome/free-solid-svg-icons";
+import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 
-const STATUS_OPTIONS: StoryStatus[] = [
-  "blocked", "canceled", "icebox", "planning", "backlog", "implementing", "qa", "review", "done",
-];
-const STATUS_LABELS: Record<StoryStatus, string> = {
-  icebox: "icebox",
-  planning: "planning",
-  backlog: "backlog",
-  implementing: "implementing",
-  qa: "qa",
-  review: "review",
-  blocked: "blocked",
-  done: "done",
-  canceled: "canceled",
+// ── Stage config ────────────────────────────────────────────────────────────
+
+type Tier = "high" | "mid" | "low" | "done" | "dead";
+
+interface StageConfig {
+  short: string;
+  color: string;
+  tier: Tier;
+}
+
+const STAGE_CONFIG: Record<StoryStatus, StageConfig> = {
+  blocked:     { short: "Blocked",  color: "var(--st-blocked)",        tier: "high" },
+  canceled:    { short: "Cancelled",color: "var(--st-cancelled)",      tier: "dead" },
+  icebox:      { short: "Icebox",   color: "var(--st-icebox)",         tier: "low"  },
+  planning:    { short: "Planning", color: "var(--st-planning)",       tier: "high" },
+  backlog:     { short: "Backlog",  color: "var(--st-backlog)",        tier: "low"  },
+  implementing:{ short: "Building", color: "var(--st-implementation)", tier: "mid"  },
+  qa:          { short: "In QA",   color: "var(--st-qa)",             tier: "mid"  },
+  review:      { short: "Review",  color: "var(--st-review)",         tier: "high" },
+  done:        { short: "Shipped", color: "var(--st-done)",           tier: "done" },
 };
 
-const DETAIL_WIDTH_KEY = "orca.storiesWorkspace.detailWidth";
-const MIN_DETAIL_WIDTH = 480;
-
-function clampDetailWidth(w: number): number {
-  const max = Math.round(window.innerWidth * 0.7);
-  return Math.max(MIN_DETAIL_WIDTH, Math.min(max, w));
+function getAgent(name: string | null) {
+  if (!name) return null;
+  const { icon, color } = resolveAgentDisplay(name);
+  return { icon, color, label: name };
 }
+
+// ── Token formatter ───────────────────────────────────────────────────────────
+
+function fmtTokens(n: number | null | undefined): string {
+  if (!n) return "—";
+  if (n < 1000) return String(n);
+  if (n < 10000) return (n / 1000).toFixed(1) + "k";
+  if (n < 1_000_000) return Math.round(n / 1000) + "k";
+  return (n / 1_000_000).toFixed(1) + "M";
+}
+
+// ── Relative time ─────────────────────────────────────────────────────────────
+
+function relTime(ts: string): string {
+  const delta = Date.now() - new Date(ts).getTime();
+  const m = Math.floor(delta / 60_000);
+  if (m < 1) return "now";
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h";
+  return Math.floor(h / 24) + "d";
+}
+
+// ── Stage pill ────────────────────────────────────────────────────────────────
+
+function StagePill({ status, active }: { status: StoryStatus; active?: boolean }) {
+  const s = STAGE_CONFIG[status];
+  if (!s) return null;
+  const classes = ["pill", active ? "active" : "", s.tier === "high" ? "attn-high" : ""].filter(Boolean).join(" ");
+  return (
+    <span className={classes} style={{ color: s.color }}>
+      <span className="pill-dot" />
+      {s.short}
+    </span>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+const STATUS_ALL: StoryStatus[] = [
+  "blocked", "canceled", "icebox", "planning", "backlog", "implementing", "qa", "review", "done",
+];
 
 export function StoriesWorkspacePage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const { activeProjectId, activeProject } = useProjectContext();
   useStoryEventStream(activeProjectId);
   const [creating, setCreating] = useState(false);
+  const [filter, setFilter] = useState<"all" | "mine" | "active">("all");
 
-  const [detailWidth, setDetailWidth] = useState<number>(() => {
-    try {
-      const stored = localStorage.getItem(DETAIL_WIDTH_KEY);
-      if (stored) {
-        const n = Number(stored);
-        if (Number.isFinite(n) && n > 0) return clampDetailWidth(n);
-      }
-    } catch { /* ignore */ }
-    return Math.round(window.innerWidth * 0.4);
-  });
-
-  const [dragging, setDragging] = useState(false);
-
-  // Clamp on window resize
-  useEffect(() => {
-    function handleResize() {
-      setDetailWidth((w) => clampDetailWidth(w));
-    }
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
-
-  // Attach drag listeners to window while dragging
-  useEffect(() => {
-    if (!dragging) return;
-
-    function handleMouseMove(e: MouseEvent) {
-      setDetailWidth(clampDetailWidth(window.innerWidth - e.clientX));
-    }
-
-    function handleMouseUp(e: MouseEvent) {
-      const final = clampDetailWidth(window.innerWidth - e.clientX);
-      setDetailWidth(final);
-      try { localStorage.setItem(DETAIL_WIDTH_KEY, String(final)); } catch { /* ignore */ }
-      setDragging(false);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    }
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [dragging]);
-
-  function handleDragStart(e: React.MouseEvent) {
-    e.preventDefault();
-    setDragging(true);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }
+  const queryClient = useQueryClient();
 
   const { data: agentsData } = useQuery({
     queryKey: ["agents"],
@@ -127,55 +118,33 @@ export function StoriesWorkspacePage() {
 
   if (!activeProjectId) {
     return (
-      <div className="h-full flex flex-col">
-        <PageHeader title="All Stories" />
-        <div className="p-6 text-muted text-sm">
-          No project selected. Create one from{" "}
-          <Link to="/projects" className="text-accent underline">Projects</Link>.
+      <div className="pane-list" style={{ flex: 1 }}>
+        <div className="sd-empty">
+          No project selected. <Link to="/projects" style={{ color: "var(--ag-impl)" }}>Create one</Link>.
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col">
-      <PageHeader
-        title={<Breadcrumb first={activeProject?.name ?? "…"} second="All Stories" />}
-        actions={
-          <button className="btn btn-primary" onClick={() => setCreating(true)} disabled={!activeProjectId}>
-            New story
-          </button>
-        }
+    <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
+      <StoryList
+        activeProjectId={activeProjectId}
+        activeProject={activeProject}
+        selectedId={id ?? null}
+        filter={filter}
+        onSetFilter={setFilter}
+        onNewStory={() => setCreating(true)}
       />
 
-      <div className="flex-1 flex min-h-0">
-        {/* Full-screen overlay during drag prevents text selection / hover effects */}
-        {dragging && (
-          <div
-            className="fixed inset-0 z-10"
-            style={{ cursor: "col-resize", backgroundColor: "rgba(0,0,0,0.01)" }}
-          />
+      <div className="pane-detail" style={{ flex: "1.6 1 0", minWidth: 480 }}>
+        {id ? (
+          <StoryDetailPanel id={id} />
+        ) : (
+          <div className="sd-empty">
+            select a story to see spec,<br />inline questions, and agent history
+          </div>
         )}
-        <div className="flex-1 min-w-0 overflow-y-auto">
-          <StoryList activeProjectId={activeProjectId} selectedId={id ?? null} />
-        </div>
-        {/* Drag handle — owns the visible border */}
-        <div
-          className={`w-1.5 shrink-0 cursor-col-resize relative z-20 transition-colors ${dragging ? "bg-accent/40" : "bg-border/40 hover:bg-accent/30"}`}
-          onMouseDown={handleDragStart}
-        />
-        <div
-          className="shrink-0 min-w-[480px] flex flex-col overflow-hidden"
-          style={{ width: detailWidth }}
-        >
-          {id ? (
-            <StoryDetailPanel id={id} />
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-sm text-muted">
-              Select a story to see its details
-            </div>
-          )}
-        </div>
       </div>
 
       {creating && (
@@ -190,11 +159,18 @@ export function StoriesWorkspacePage() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Story list (center column)
-// ---------------------------------------------------------------------------
+// ── Story list (left pane) ────────────────────────────────────────────────────
 
-function StoryList({ activeProjectId, selectedId }: { activeProjectId: string; selectedId: string | null }) {
+interface StoryListProps {
+  activeProjectId: string;
+  activeProject: { id: string; name: string } | null;
+  selectedId: string | null;
+  filter: "all" | "mine" | "active";
+  onSetFilter: (f: "all" | "mine" | "active") => void;
+  onNewStory: () => void;
+}
+
+function StoryList({ activeProjectId, activeProject, selectedId, filter, onSetFilter, onNewStory }: StoryListProps) {
   const navigate = useNavigate();
 
   const { data, isLoading } = useQuery({
@@ -204,112 +180,173 @@ function StoryList({ activeProjectId, selectedId }: { activeProjectId: string; s
         ? api.stories.list({ projectId: activeProjectId })
         : Promise.resolve({ stories: [] as Story[] }),
     enabled: !!activeProjectId,
-    refetchInterval: (q) => {
-      const stories = q.state.data?.stories ?? [];
-      return stories.some((s) => s.status === "implementing") ? 10_000 : 30_000;
-    },
+    refetchInterval: 15_000,
   });
 
-  const visible = data?.stories ?? [];
+  const stories = data?.stories ?? [];
 
-  const [, setTick] = useState(0);
-  const hasInProgress = visible.some((s) => s.status === "implementing");
+  const filtered = React.useMemo(() => {
+    if (filter === "mine") return stories.filter((s) => s.status === "planning" || s.status === "review" || s.status === "blocked");
+    if (filter === "active") return stories.filter((s) => s.dispatchPid != null);
+    return stories;
+  }, [stories, filter]);
+
+  const counts = {
+    all: stories.length,
+    mine: stories.filter((s) => s.status === "planning" || s.status === "review" || s.status === "blocked").length,
+    active: stories.filter((s) => s.dispatchPid != null).length,
+  };
+
+  // Auto-select the first story when none is selected (e.g. on project open)
   useEffect(() => {
-    if (!hasInProgress) return;
-    const id = setInterval(() => setTick((t) => t + 1), 10_000);
-    return () => clearInterval(id);
-  }, [hasInProgress]);
+    if (!selectedId && !isLoading && filtered.length > 0) {
+      navigate(`/stories/${filtered[0]!.id}`, { replace: true });
+    }
+  }, [selectedId, isLoading, filtered, navigate]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).tagName === "TEXTAREA" || (e.target as HTMLElement).tagName === "INPUT") return;
+      if (e.key === "j" || e.key === "ArrowDown") {
+        const idx = filtered.findIndex((s) => s.id === selectedId);
+        const next = filtered[Math.min(filtered.length - 1, idx + 1)];
+        if (next) navigate(`/stories/${next.id}`);
+        e.preventDefault();
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        const idx = filtered.findIndex((s) => s.id === selectedId);
+        const next = filtered[Math.max(0, idx - 1)];
+        if (next) navigate(`/stories/${next.id}`);
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [filtered, selectedId, navigate]);
+
+  const projectName = activeProject?.name ?? "…";
 
   return (
-    <>
-      {isLoading && <div className="p-6 text-muted text-sm">loading…</div>}
-      <table className="w-full text-left">
-        <thead>
-          <tr className="border-b border-border text-[11px] text-muted uppercase tracking-wide">
-            <th className="px-6 py-2 font-medium">Title</th>
-            <th className="px-2 py-2 font-medium text-right w-[64px]">Cost</th>
-            <th className="px-2 py-2 font-medium text-right w-[80px]">Tokens</th>
-            <th className="px-2 py-2 font-medium text-right pr-6 w-[88px]">Updated</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {visible.map((story) => {
-            const isActive = story.dispatchPid != null;
-            const isSelected = selectedId === story.id;
-            const activeRowClass = story.status === "implementing"
-              ? "bg-yellow-500/[0.04]"
-              : story.status === "qa"
-              ? "bg-orange-500/[0.04]"
-              : "";
-            const rowClass = isSelected
-              ? "bg-accent/10 border-l-2 border-l-accent hover:bg-accent/10"
-              : `border-l-2 border-l-transparent hover:bg-surface ${isActive ? `${activeRowClass} animate-pulse` : activeRowClass}`;
-            return (
-              <tr
-                key={story.id}
-                className={`group transition-colors cursor-pointer ${rowClass}`}
-                onClick={() => navigate(`/stories/${story.id}`)}
-              >
-                <td className="px-6 py-2.5">
-                  <div className={`flex items-start gap-2 text-sm ${isSelected ? "text-text" : "text-text group-hover:text-accent"}`}>
-                    <StatusDot status={story.status} className="shrink-0 mt-0.5" pulse={isActive} />
-                    <span className="flex-1 min-w-0 break-words">{story.title}</span>
-                    <div className="shrink-0 flex items-center gap-2 whitespace-nowrap pt-0.5">
-                      {story.status === "implementing" && story.dispatchPid != null && (
-                        <span className="text-[11px] text-muted">
-                          pid {story.dispatchPid}
-                          {story.dispatchedAt && <> · {formatElapsed(story.dispatchedAt)}</>}
-                          {story.lastActivityAt && <> · {formatElapsed(story.lastActivityAt)} ago</>}
-                        </span>
-                      )}
-                      {story.labels.slice(0, 2).map((l) => (
-                        <span key={l} className="pill">{l}</span>
-                      ))}
-                    </div>
-                  </div>
-                </td>
-                <td className="px-2 py-2.5 text-right text-[11px] text-muted whitespace-nowrap">
-                  {story.totalCostUsd != null ? `$${story.totalCostUsd.toFixed(2)}` : ""}
-                </td>
-                <td className="px-2 py-2.5 text-right">
-                  {story.totalTokensUsed != null && (
-                    <span className="text-[11px] font-medium whitespace-nowrap" style={{ color: tokenHeatColor(story.totalTokensUsed) }}>
-                      {formatTokens(story.totalTokensUsed)}
-                    </span>
-                  )}
-                </td>
-                <td className="px-2 py-2.5 text-right pr-6 text-xs text-muted whitespace-nowrap">
-                  {new Date(story.updatedAt).toLocaleDateString()}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </>
+    <div className="pane-list" style={{ flex: "1.1 1 0", minWidth: 380 }}>
+      <div className="pl-toolbar">
+        <span className="pl-title">{projectName}</span>
+        <span className="pl-count">{isLoading ? "…" : `${filtered.length}/${stories.length}`}</span>
+        <div className="pl-chips">
+          <Chip label="all" count={counts.all} active={filter === "all"} onClick={() => onSetFilter("all")} />
+          <Chip label="waiting on me" count={counts.mine} active={filter === "mine"} color="var(--attn-high)" onClick={() => onSetFilter("mine")} />
+          <Chip label="active" count={counts.active} active={filter === "active"} color="var(--ag-impl)" onClick={() => onSetFilter("active")} />
+        </div>
+        <span className="pl-new" onClick={onNewStory} title="Create story (C)">
+          <span className="pl-new-plus">+</span>
+          <span>New story</span>
+        </span>
+      </div>
+
+      <div className="pl-head">
+        <span>ID</span>
+        <span>Title</span>
+        <span>Stage</span>
+        <span>Agent</span>
+        <span style={{ textAlign: "right" }}>Tokens</span>
+        <span style={{ textAlign: "right" }}>Upd</span>
+      </div>
+
+      <div className="pl-rows">
+        {isLoading && (
+          <div style={{ padding: "20px var(--pad-x)", color: "var(--fg-3)", fontFamily: "var(--mono)", fontSize: 11.5 }}>
+            loading…
+          </div>
+        )}
+        {!isLoading && filtered.length === 0 && (
+          <div style={{ padding: "40px", textAlign: "center", color: "var(--fg-3)", fontFamily: "var(--mono)", fontSize: 12 }}>
+            ∅ no stories match this filter
+          </div>
+        )}
+        {filtered.map((story) => (
+          <StoryRow
+            key={story.id}
+            story={story}
+            active={story.id === selectedId}
+            onClick={() => navigate(`/stories/${story.id}`)}
+          />
+        ))}
+        <div style={{ padding: "10px var(--pad-x)", color: "var(--fg-4)", fontFamily: "var(--mono)", fontSize: 11, display: "flex", alignItems: "center", gap: 8 }}>
+          <span>+</span>
+          <span style={{ cursor: "default" }} onClick={onNewStory}>Quick-capture a story…</span>
+          <span className="kbd" style={{ marginLeft: "auto" }}>C</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Story detail panel (right column)
-// ---------------------------------------------------------------------------
+function StoryRow({ story, active, onClick }: { story: Story; active: boolean; onClick: () => void }) {
+  const agent = getAgent(story.agent);
+  const isAgentActive = story.dispatchPid != null;
+  const stage = STAGE_CONFIG[story.status];
+  const rowClasses = [
+    "pl-row",
+    active ? "active" : "",
+    stage?.tier === "high" ? "attn-high" : "",
+    stage?.tier === "done" ? "tier-done" : "",
+    stage?.tier === "dead" ? "tier-dead" : "",
+  ].filter(Boolean).join(" ");
+
+  return (
+    <div className={rowClasses} onClick={onClick}>
+      <div className="pl-cell-id">#{story.id.slice(0, 7)}</div>
+      <div className="pl-cell-title">{story.title}</div>
+      <div className="pl-cell-stage">
+        <StagePill status={story.status} active={isAgentActive} />
+      </div>
+      <div className="pl-cell-agent">
+        {agent ? (
+          <>
+            <FontAwesomeIcon icon={agent.icon} style={{ color: agent.color }} />
+            <span style={{ color: "var(--fg-2)", fontSize: 11 }}>{agent.label}</span>
+            {isAgentActive && (
+              <span className="typing" style={{ color: agent.color, marginLeft: 2 }}>
+                <i /><i /><i />
+              </span>
+            )}
+          </>
+        ) : (
+          <span style={{ color: "var(--fg-4)" }}>—</span>
+        )}
+      </div>
+      <div
+        className="pl-cell-tokens"
+        title={story.totalTokensUsed != null ? story.totalTokensUsed.toLocaleString() + " tokens" : "no tokens used yet"}
+      >
+        {story.totalTokensUsed ? fmtTokens(story.totalTokensUsed) : <span style={{ color: "var(--fg-4)" }}>—</span>}
+      </div>
+      <div className="pl-cell-updated">{relTime(story.updatedAt)}</div>
+    </div>
+  );
+}
+
+function Chip({ label, count, active, color, onClick }: { label: string; count: number; active: boolean; color?: string; onClick: () => void }) {
+  return (
+    <span className={"pl-chip" + (active ? " active" : "")} onClick={onClick}>
+      {color && <span className="pl-chip-dot" style={{ background: color }} />}
+      <span>{label}</span>
+      <span style={{ color: "var(--fg-3)" }}>{count}</span>
+    </span>
+  );
+}
+
+// ── Story detail (right pane) ─────────────────────────────────────────────────
+
+type DetailTab = "spec" | "history" | "controls" | "original";
 
 function StoryDetailPanel({ id }: { id: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [editingSpec, setEditingSpec] = useState(false);
-  const [titleDraft, setTitleDraft] = useState("");
-  const [specDraft, setSpecDraft] = useState("");
-  const [specHeight, setSpecHeight] = useState<number | null>(null);
-  const [statusOpen, setStatusOpen] = useState(false);
-  const [statusPos, setStatusPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [tab, setTab] = useState<DetailTab>("spec");
+  const [commentBody, setCommentBody] = useState("");
+  const [commentInterrupt, setCommentInterrupt] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
-  const titleRef = useRef<HTMLInputElement>(null);
-  const specRef = useRef<HTMLTextAreaElement>(null);
-  const statusBtnRef = useRef<HTMLButtonElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
 
   const { data, isLoading } = useQuery({
@@ -318,9 +355,23 @@ function StoryDetailPanel({ id }: { id: string }) {
     enabled: !!id,
     refetchInterval: (q) => {
       const s = q.state.data?.story.status;
-      return s === "implementing" ? 2000 : 30_000;
+      return s === "implementing" ? 3000 : 15_000;
     },
   });
+
+  // Switch to history tab when story is in blocked/review stage
+  useEffect(() => {
+    if (!data) return;
+    const s = data.story.status;
+    if (s === "blocked" || s === "review") setTab("history");
+    else setTab("spec");
+  }, [data?.story?.id]);
+
+  // Reset on story switch
+  useEffect(() => {
+    setMenuOpen(false);
+    setCommentBody("");
+  }, [id]);
 
   const dispatchMut = useMutation({
     mutationFn: () => api.stories.dispatch(id),
@@ -337,17 +388,6 @@ function StoryDetailPanel({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: ["story", id] });
       queryClient.invalidateQueries({ queryKey: ["stories"] });
       queryClient.invalidateQueries({ queryKey: ["story-counts"] });
-    },
-  });
-
-  const [commentBody, setCommentBody] = useState("");
-  const [commentInterrupt, setCommentInterrupt] = useState(true);
-  const commentMut = useMutation({
-    mutationFn: () => api.stories.comment(id, { body: commentBody, interrupt: commentInterrupt }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["story", id] });
-      queryClient.invalidateQueries({ queryKey: ["stories"] });
-      setCommentBody("");
     },
   });
 
@@ -370,24 +410,18 @@ function StoryDetailPanel({ id }: { id: string }) {
     },
   });
 
+  const commentMut = useMutation({
+    mutationFn: () => api.stories.comment(id, { body: commentBody, interrupt: commentInterrupt }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["story", id] });
+      setCommentBody("");
+    },
+  });
+
   const { data: agentsData } = useQuery({
     queryKey: ["agents"],
     queryFn: () => api.agents.list(),
   });
-
-  // Status dropdown outside-click + reposition
-  useEffect(() => {
-    if (!statusOpen) return;
-    function handleClick(e: MouseEvent) {
-      const target = e.target as Node;
-      if (statusBtnRef.current && statusBtnRef.current.contains(target)) return;
-      const drop = document.getElementById("status-fixed-dropdown");
-      if (drop && drop.contains(target)) return;
-      setStatusOpen(false);
-    }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [statusOpen]);
 
   // ⋯ menu outside-click
   useEffect(() => {
@@ -403,21 +437,9 @@ function StoryDetailPanel({ id }: { id: string }) {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [menuOpen]);
 
-  useEffect(() => { if (editingTitle) titleRef.current?.focus(); }, [editingTitle]);
-  useEffect(() => { if (editingSpec) specRef.current?.focus(); }, [editingSpec]);
-
-  // Reset editing/draft state when switching stories
-  useEffect(() => {
-    setEditingTitle(false);
-    setEditingSpec(false);
-    setStatusOpen(false);
-    setMenuOpen(false);
-    setCommentBody("");
-  }, [id]);
-
   if (isLoading || !data) {
     return (
-      <div className="p-6 text-muted text-sm">loading…</div>
+      <div className="sd-empty" style={{ paddingTop: 60 }}>loading…</div>
     );
   }
 
@@ -425,162 +447,11 @@ function StoryDetailPanel({ id }: { id: string }) {
   const openQuestions = (rawQuestions ?? []).filter((q) => q.status === "open");
   const answeredQuestions = (rawQuestions ?? []).filter((q) => q.status === "answered");
 
-  const workspace: string | undefined = [...rawActivity]
-    .reverse()
-    .find((e: ActivityEvent) => e.kind === "dispatch_started")
-    ?.payload?.repoPath as string | undefined;
-
-  // Build dispatch timeline so activity rows can show agent/model context.
-  const dispatchTimeline: { ts: string; agent: string | undefined; model: string | undefined }[] = [];
-  for (const e of rawActivity) {
-    if (e.kind === "dispatch_started") {
-      const p = e.payload as Record<string, unknown> | undefined;
-      dispatchTimeline.push({
-        ts: e.createdAt,
-        agent: (p?.agent ?? p?.archetype) as string | undefined,
-        model: p?.model as string | undefined,
-      });
-    }
-  }
-  // Backfill actual model from dispatch_completed.
-  for (const e of rawActivity) {
-    if (e.kind === "dispatch_completed") {
-      const completedModel = (e.payload as Record<string, unknown>)?.model as string | undefined;
-      if (!completedModel) continue;
-      for (let i = dispatchTimeline.length - 1; i >= 0; i--) {
-        const entry = dispatchTimeline[i];
-        if (!entry) continue;
-        if (entry.ts <= e.createdAt) {
-          if (!entry.model) entry.model = completedModel;
-          break;
-        }
-      }
-    }
-  }
-
-  function agentContextFor(event: ActivityEvent): { agent?: string; model?: string } {
-    const p = event.payload as Record<string, unknown> | undefined;
-    const agent = event.actor ?? undefined;
-    if (p?.model) return { agent, model: p.model as string };
-    let best: (typeof dispatchTimeline)[number] | undefined;
-    for (const d of dispatchTimeline) {
-      if (d.ts <= event.createdAt) best = d;
-    }
-    return { agent, model: best?.model };
-  }
-
-  // Only hide a dispatch_claim if the very same dispatch instance also
-  // logged a dispatch_dropped (the claim guard self-killed). A standalone
-  // claim that proceeded into a real dispatch is signal, not noise — never
-  // hide it.
-  const droppedInstanceIds = new Set<string>();
-  for (const e of rawActivity) {
-    if (e.kind !== "dispatch_dropped") continue;
-    const id = e.dispatchInstanceId;
-    if (id) droppedInstanceIds.add(id);
-  }
-
-  // APPEND-ONLY: every suppression rule below was added in response to a
-  // specific user complaint and is load-bearing. Add new rules alongside
-  // these — never rewrite the block to contain only the new rule.
-  const activity = rawActivity.filter((e) => {
-    // story_created is implicit — suppress it
-    if (e.kind === "story_created") return false;
-    // Comments, agent prompts, and transition events are always shown (rendered as bubbles)
-    if (e.kind === "comment" || e.kind === "agent_prompt" || e.kind === "agent_transition" || e.kind === "state_transition") return true;
-    if (e.kind === "dispatch_started") {
-      const p = e.payload as Record<string, unknown> | undefined;
-      if (workspace && p?.repoPath === workspace) return false;
-      return true;
-    }
-    // Only suppress claim+drop pairs (instance opened and immediately
-    // self-killed by the claim guard). A claim with no matching drop is a
-    // real dispatch and stays visible.
-    if (e.kind === "dispatch_claim") {
-      const id = e.dispatchInstanceId;
-      if (id && droppedInstanceIds.has(id)) return false;
-      return true;
-    }
-    if (e.kind === "dispatch_dropped") {
-      const p = e.payload as Record<string, unknown> | undefined;
-      if (p?.reason === "another_active_dispatch") return false;
-      return true;
-    }
-    if (e.kind !== "agent_stream") return true;
-
-    const p = e.payload as Record<string, unknown>;
-    const type = p.type as string | undefined;
-
-    if (!type && p.result === "clear") return false;
-
-    if (type === "system") {
-      const sub = p.subtype as string | undefined;
-      if (sub === "task_started" || sub === "task_progress" || sub === "task_notification" || sub === "init" || sub === "compact_boundary" || sub === "status") return false;
-      return true;
-    }
-
-    if (type === "user") {
-      const content = extractContent(p);
-      const tr = content.find((c) => c.type === "tool_result");
-      // hide ALL tool results (including errors) — user requested no tool results shown
-      if (tr) return false;
-      return false;
-    }
-
-    if (type === "assistant") {
-      const content = extractContent(p);
-      if (content.length === 0) return false;
-      const hasNonEmptyText = content.some((c) => c.type === "text" && (c.text ?? "").trim() !== "");
-      const toolUses = content.filter((c) => c.type === "tool_use");
-      if (toolUses.length === 0 && !hasNonEmptyText) return false;
-      if (hasNonEmptyText) return true;
-      if (toolUses.length > 0 && toolUses.every((c) => isHideableToolUse(c.name ?? "", c.input, workspace))) return false;
-      return true;
-    }
-
-    if (type === "rate_limit_event") {
-      const rli = p.rate_limit_info as Record<string, unknown> | undefined;
-      if (rli && rli.status === "allowed" && rli.overageStatus === "rejected" && rli.rateLimitType === "five_hour" && rli.isUsingOverage === false && rli.overageDisabledReason === "org_level_disabled") {
-        const expectedTopKeys = new Set(["type", "uuid", "session_id", "rate_limit_info"]);
-        const expectedRliKeys = new Set(["status", "resetsAt", "overageStatus", "rateLimitType", "isUsingOverage", "overageDisabledReason"]);
-        const topKeys = Object.keys(p);
-        const rliKeys = Object.keys(rli);
-        if (topKeys.length === expectedTopKeys.size && topKeys.every((k) => expectedTopKeys.has(k)) && rliKeys.length === expectedRliKeys.size && rliKeys.every((k) => expectedRliKeys.has(k))) return false;
-      }
-    }
-
-    if (workspace && JSON.stringify(p).includes(`spawning claude-local in ${workspace}`)) return false;
-
-    return true;
-  });
-
-  const dispatchable = story.status !== "implementing";
+  const stage = STAGE_CONFIG[story.status];
+  const agent = getAgent(story.agent);
+  const isAgentActive = story.dispatchPid != null;
   const running = story.status === "implementing";
-  const agentRunning = story.dispatchPid != null;
-  const agentRunColor = story.status === "qa"
-    ? { text: "text-orange-400", bg: "bg-qa" }
-    : { text: "text-yellow-400", bg: "bg-implementing" };
-
-  const startEditTitle = () => { setTitleDraft(story.title); setEditingTitle(true); };
-  const saveTitle = () => {
-    const trimmed = titleDraft.trim();
-    if (trimmed && trimmed !== story.title) patchMut.mutate({ title: trimmed });
-    setEditingTitle(false);
-  };
-
-  const startEditSpec = () => { setSpecDraft(story.specMd); setEditingSpec(true); };
-  const saveSpec = () => {
-    if (specDraft !== story.specMd) patchMut.mutate({ specMd: specDraft });
-    setEditingSpec(false);
-  };
-
-  const toggleStatus = () => {
-    if (!statusOpen) {
-      const r = statusBtnRef.current?.getBoundingClientRect();
-      if (r) setStatusPos({ top: r.bottom + 4, left: r.left, width: r.width });
-    }
-    setStatusOpen((v) => !v);
-  };
+  const dispatchable = story.status !== "implementing";
 
   const toggleMenu = () => {
     if (!menuOpen) {
@@ -603,303 +474,213 @@ function StoryDetailPanel({ id }: { id: string }) {
     if (confirm(`Delete "${story.title}"? This cannot be undone.`)) deleteMut.mutate();
   };
 
+  // Build workspace path for activity filtering
+  const workspace: string | undefined = [...rawActivity]
+    .reverse()
+    .find((e: ActivityEvent) => e.kind === "dispatch_started")
+    ?.payload?.repoPath as string | undefined;
+
+  const droppedInstanceIds = new Set<string>();
+  for (const e of rawActivity) {
+    if (e.kind !== "dispatch_dropped") continue;
+    const instId = e.dispatchInstanceId;
+    if (instId) droppedInstanceIds.add(instId);
+  }
+
+  const activity = rawActivity.filter((e) => {
+    if (e.kind === "story_created") return false;
+    if (e.kind === "comment" || e.kind === "agent_prompt" || e.kind === "agent_transition" || e.kind === "state_transition") return true;
+    if (e.kind === "dispatch_started") {
+      const p = e.payload as Record<string, unknown> | undefined;
+      if (workspace && p?.repoPath === workspace) return false;
+      return true;
+    }
+    if (e.kind === "dispatch_claim") {
+      const instId = e.dispatchInstanceId;
+      if (instId && droppedInstanceIds.has(instId)) return false;
+      return true;
+    }
+    if (e.kind === "dispatch_dropped") {
+      const p = e.payload as Record<string, unknown> | undefined;
+      if (p?.reason === "another_active_dispatch") return false;
+      return true;
+    }
+    if (e.kind !== "agent_stream") return true;
+    const p = e.payload as Record<string, unknown>;
+    const type = p.type as string | undefined;
+    if (!type && p.result === "clear") return false;
+    if (type === "system") {
+      const sub = p.subtype as string | undefined;
+      if (sub === "task_started" || sub === "task_progress" || sub === "task_notification" || sub === "init" || sub === "compact_boundary" || sub === "status" || sub === "post_turn_summary") return false;
+      return true;
+    }
+    if (type === "user") return false;
+    if (type === "assistant") {
+      const content = extractContent(p);
+      if (content.length === 0) return false;
+      const hasNonEmptyText = content.some((c) => c.type === "text" && (c.text ?? "").trim() !== "");
+      const toolUses = content.filter((c) => c.type === "tool_use");
+      if (toolUses.length === 0 && !hasNonEmptyText) return false;
+      if (hasNonEmptyText) return true;
+      if (toolUses.length > 0 && toolUses.every((c) => isHideableToolUse(c.name ?? "", c.input, workspace))) return false;
+      return true;
+    }
+    if (workspace && JSON.stringify(p).includes(`spawning claude-local in ${workspace}`)) return false;
+    return true;
+  });
+
   return (
     <>
-      <div className="flex-1 overflow-y-auto">
-        <div className="px-5 py-4 space-y-5">
-          {/* Header: Row 1 = id chip + action buttons; Row 2 = editable title */}
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <span className="text-muted text-sm shrink-0 font-mono">#{story.id.slice(0, 8)}</span>
-              <div className="flex-1" />
-              <div className="flex items-center gap-2 shrink-0">
-              {story.status === "review" && (
-                <button
-                  className="btn btn-primary"
-                  onClick={() => patchMut.mutate({ status: "done" })}
-                  disabled={patchMut.isPending}
-                  title="Mark this story done"
-                >
-                  Done
-                </button>
-              )}
-              {running ? (
-                <button
-                  className="btn bg-red-600 hover:bg-red-700 text-white"
-                  onClick={() => stopMut.mutate()}
-                  disabled={stopMut.isPending}
-                  title="Kill the running agent and block the story"
-                >
-                  {stopMut.isPending ? "Stopping…" : "Stop"}
-                </button>
-              ) : (
-                <button
-                  className="btn btn-primary"
-                  onClick={() => dispatchMut.mutate()}
-                  disabled={!dispatchable || dispatchMut.isPending}
-                  title={dispatchable ? "Spawn claude in the project repo with this story's spec" : "Cannot dispatch a story that is already in progress"}
-                >
-                  {dispatchMut.isPending ? "Dispatching…" : "Dispatch"}
-                </button>
-              )}
-              <button
-                ref={menuBtnRef}
-                className="btn px-2 cursor-pointer"
-                onClick={toggleMenu}
-                title="More actions"
-                aria-label="More actions"
-              >
-                <FontAwesomeIcon icon={faEllipsis} />
-              </button>
-              </div>
-            </div>
-            {/* Row 2: editable story title */}
-            {editingTitle ? (
-              <form onSubmit={(e) => { e.preventDefault(); saveTitle(); }}>
-                <input
-                  ref={titleRef}
-                  className="w-full text-sm font-semibold bg-surface border border-border rounded px-2 py-0.5 text-text"
-                  value={titleDraft}
-                  onChange={(e) => setTitleDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Escape") setEditingTitle(false); }}
-                  onBlur={saveTitle}
-                />
-              </form>
-            ) : (
-              <span
-                className="text-sm font-semibold text-text cursor-pointer hover:underline decoration-dotted underline-offset-4 break-words"
-                onClick={startEditTitle}
-                title="Click to edit title"
-              >
-                {story.title}
-              </span>
+      <div className="sd-head">
+        <div className="sd-head-row">
+          <div className="sd-head-tokens" title={story.totalTokensUsed != null ? story.totalTokensUsed.toLocaleString() + " tokens" : "no tokens used"}>
+            <span className="sd-head-tokens-arrow">Σ</span>
+            <span className="sd-head-tokens-val">{fmtTokens(story.totalTokensUsed)}</span>
+            <span className="sd-head-tokens-lbl">tokens</span>
+            {story.totalCostUsd != null && (
+              <>
+                <span className="sd-head-sep">·</span>
+                <span className="sd-head-tokens-val">${story.totalCostUsd.toFixed(2)}</span>
+                <span className="sd-head-tokens-lbl">cost</span>
+              </>
             )}
           </div>
+          <span className="sd-head-author" style={{ marginLeft: "auto", color: "var(--fg-2)", fontSize: 11.5 }}>
+            #{story.id.slice(0, 7)} · {relTime(story.updatedAt) === "now" ? "just now" : `${relTime(story.updatedAt)} ago`}
+          </span>
+          {/* actions */}
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: 10 }}>
+            {story.status === "review" && (
+              <button className="btn btn-sm btn-primary" onClick={() => patchMut.mutate({ status: "done" })}>✓ Done</button>
+            )}
+            {running ? (
+              <button className="btn btn-sm btn-danger" onClick={() => stopMut.mutate()}>
+                {stopMut.isPending ? "…" : "Stop"}
+              </button>
+            ) : (
+              <button
+                className="btn btn-sm btn-primary"
+                disabled={!dispatchable || dispatchMut.isPending}
+                onClick={() => dispatchable && !dispatchMut.isPending && dispatchMut.mutate()}
+              >
+                {dispatchMut.isPending ? "…" : "Dispatch"}
+              </button>
+            )}
+            <button ref={menuBtnRef} className="btn btn-sm" onClick={toggleMenu}>
+              <FontAwesomeIcon icon={faEllipsis} />
+            </button>
+          </div>
+        </div>
 
-          {agentRunning && (
-            <Section title="Run">
-              <div className={`flex items-center gap-2 text-xs ${agentRunColor.text}`}>
-                <span className="relative flex h-2 w-2 shrink-0">
-                  <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 animate-ping ${agentRunColor.bg}`} />
-                  <span className={`relative inline-flex h-2 w-2 rounded-full ${agentRunColor.bg}`} />
-                </span>
-                <span className="font-medium">{story.agent ?? "agent"}</span>
-                <span>running</span>
-                <span className="text-muted">pid {story.dispatchPid}</span>
-              </div>
-            </Section>
+        <div className="sd-title">{story.title}</div>
+
+        <div className="sd-meta-row">
+          <MetaDropdown
+            value={story.status}
+            options={STATUS_ALL.map((s) => ({ value: s, label: STAGE_CONFIG[s]?.short ?? s, color: STAGE_CONFIG[s]?.color }))}
+            color={stage?.color}
+            disabled={patchMut.isPending}
+            onChange={(v) => patchMut.mutate({ status: v })}
+          />
+          <MetaDropdown
+            value={(story.agent ?? "") as string}
+            options={[{ value: "", label: "(unassigned)" }, ...(agentsData?.agents ?? []).map((a) => { const d = resolveAgentDisplay(a.name); return { value: a.name, label: a.name, color: d.color, icon: d.icon }; })]}
+            color={agent?.color ?? "var(--fg-3)"}
+            icon={agent?.icon}
+            disabled={running || patchMut.isPending}
+            onChange={(v) => patchMut.mutate({ agent: v || null })}
+          />
+          {story.priority != null && story.priority > 0 && (
+            <span className="pill" style={{ color: "var(--fg-2)" }}>
+              <span className="pill-dot" />
+              P{story.priority}
+            </span>
           )}
+        </div>
 
-          <Section title="Status / Agent">
-            <div className="flex gap-2">
-              <div className="flex-1 min-w-0">
-                <div className="text-[10px] text-muted mb-1">Status</div>
-                <button
-                  ref={statusBtnRef}
-                  className="flex items-center gap-2 w-full bg-surface2 border border-border rounded-md px-3 py-2 text-sm text-left hover:border-accent/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                  onClick={toggleStatus}
-                  disabled={running || patchMut.isPending}
-                >
-                  <StatusDot status={story.status} />
-                  <span className="flex-1 text-text">{STATUS_LABELS[story.status]}</span>
-                  <span className="text-muted text-xs">▾</span>
-                </button>
+        {/* Agent-active banner */}
+        {isAgentActive && agent && (
+          <div className="sd-agent-active" style={{ "--ag": agent.color } as React.CSSProperties}>
+            <span className="sd-agent-active-stripe" />
+            <span className="sd-agent-active-glyph"><FontAwesomeIcon icon={agent.icon} /></span>
+            <div className="sd-agent-active-body">
+              <div className="sd-agent-active-head">
+                <span className="sd-agent-active-label">
+                  <span className="sd-agent-active-name">{agent.label}</span>
+                  <span className="sd-agent-active-status">working</span>
+                </span>
+                <span className="typing" style={{ color: agent.color }}><i /><i /><i /></span>
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[10px] text-muted mb-1">Agent</div>
-                <select
-                  className="w-full bg-surface2 border border-border rounded-md px-3 py-2 text-sm text-text cursor-pointer outline-none hover:border-accent/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  value={story.agent ?? ""}
-                  onChange={(e) => patchMut.mutate({ agent: e.target.value || null })}
-                  disabled={running || patchMut.isPending}
-                >
-                  <option value="">(unassigned)</option>
-                  {agentsData?.agents.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
-                </select>
+              <div className="sd-agent-active-task">
+                {story.dispatchedAt ? `running · started ${formatElapsed(story.dispatchedAt)} ago` : "running"}
+                {story.dispatchPid != null ? ` · pid ${story.dispatchPid}` : ""}
               </div>
             </div>
-          </Section>
-
-          <Section
-            title="Spec"
-            action={!editingSpec && <button className="text-[11px] text-accent hover:underline cursor-pointer" onClick={startEditSpec}>Edit</button>}
-          >
-            {editingSpec ? (
-              <div className="space-y-2">
-                <textarea
-                  ref={specRef}
-                  className="w-full text-sm text-text bg-surface rounded-md border border-border p-3 resize-y"
-                  style={specHeight !== null ? { height: specHeight } : { minHeight: 400 }}
-                  value={specDraft}
-                  onChange={(e) => setSpecDraft(e.target.value)}
-                  onMouseUp={() => { if (specRef.current) setSpecHeight(specRef.current.offsetHeight); }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") setEditingSpec(false);
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) saveSpec();
-                  }}
-                />
-                <div className="flex gap-2">
-                  <button className="btn btn-primary text-xs" onClick={saveSpec} disabled={patchMut.isPending}>
-                    {running ? "Save & re-dispatch" : "Save"}
-                  </button>
-                  <button className="btn text-xs" onClick={() => setEditingSpec(false)}>Cancel</button>
-                  {running && <span className="text-[11px] text-amber-400 self-center">Saving will interrupt the running agent.</span>}
-                </div>
-              </div>
-            ) : (
-              <div className="whitespace-pre-wrap text-sm text-text bg-surface rounded-md border border-border p-3 cursor-pointer hover:border-accent/40 transition-colors" onClick={startEditSpec} title="Click to edit spec">
-                {story.specMd || "(empty — click to add a spec)"}
-              </div>
-            )}
-          </Section>
-
-          {(openQuestions.length > 0 ||
-            answeredQuestions.length > 0 ||
-            story.status === "planning") && (
-            <Section
-              title="Q&A"
-              subtitle={
-                openQuestions.length > 0
-                  ? `${openQuestions.length} open${
-                      answeredQuestions.length > 0
-                        ? ` · ${answeredQuestions.length} answered`
-                        : ""
-                    }`
-                  : answeredQuestions.length > 0
-                  ? `${answeredQuestions.length} answered`
-                  : story.status === "planning"
-                  ? "spec-writer is working"
-                  : undefined
-              }
-            >
-              {openQuestions.length === 0 && answeredQuestions.length === 0 ? (
-                <div className="text-xs text-muted">
-                  spec-writer is reviewing the spec. Questions will appear here.
-                </div>
-              ) : (
-                <ul className="space-y-3">
-                  {openQuestions.map((q) => (
-                    <QuestionForm key={q.id} question={q} storyId={story.id} />
-                  ))}
-                  {answeredQuestions.map((q) => (
-                    <AnsweredQuestion key={q.id} question={q} />
-                  ))}
-                </ul>
+            <div className="sd-agent-active-meta">
+              {story.dispatchedAt && (
+                <span className="sd-agent-active-since">started {formatElapsed(story.dispatchedAt)} ago</span>
               )}
-            </Section>
-          )}
-
-          <Section title="History">
-            {activity.length === 0 ? (
-              <div className="text-xs text-muted pb-4">No activity yet. Click Dispatch to spawn the agent.</div>
-            ) : (
-              <ol className="space-y-1 pb-4">
-                {(() => {
-                  // Forward pass (chronological order) — open a bubble on genuine agent
-                  // text, absorb all following arrow rows into it, close on non-agent_stream.
-                  // Activity from the API is desc (latest-first); .reverse() = chronological.
-                  type Group =
-                    | { type: "bubble"; event: ActivityEvent; arrows: ActivityEvent[] }
-                    | { type: "continuing"; actor: string; arrows: ActivityEvent[] }
-                    | { type: "other"; event: ActivityEvent };
-                  // Any event rendered as a bubble can absorb following arrows
-                  // from the same actor. Orphaned arrows (no matching bubble) are
-                  // grouped into a synthetic "Continuing…" bubble per actor.
-                  const BUBBLE_KINDS = new Set(["state_transition", "agent_transition", "comment", "agent_prompt"]);
-                  const groups: Group[] = [];
-                  let openBubble: { event: ActivityEvent; arrows: ActivityEvent[] } | null = null;
-                  for (const e of [...activity].reverse()) {
-                    const evLine = shortenHome(renderEvent(e));
-                    const isGenuineText = e.kind === "agent_stream" && !evLine.startsWith("→");
-                    const isArrowRow   = e.kind === "agent_stream" &&  evLine.startsWith("→");
-                    const isBubbleKind = isGenuineText || BUBBLE_KINDS.has(e.kind);
-
-                    if (isBubbleKind) {
-                      // Finalize any open bubble, start a new one
-                      if (openBubble) groups.push({ type: "bubble", ...openBubble });
-                      openBubble = { event: e, arrows: [] };
-                    } else if (isArrowRow) {
-                      if (openBubble && openBubble.event.actor === e.actor) {
-                        // Same actor — absorb into open bubble
-                        openBubble.arrows.push(e);
-                      } else {
-                        // Different actor or no open bubble — fold into a "Continuing…" group
-                        if (openBubble) { groups.push({ type: "bubble", ...openBubble }); openBubble = null; }
-                        const last = groups[groups.length - 1];
-                        if (last?.type === "continuing" && last.actor === e.actor) {
-                          last.arrows.push(e);
-                        } else {
-                          groups.push({ type: "continuing", actor: e.actor, arrows: [e] });
-                        }
-                      }
-                    } else {
-                      // Non-bubble event — close chain, insert inline
-                      if (openBubble) { groups.push({ type: "bubble", ...openBubble }); openBubble = null; }
-                      groups.push({ type: "other", event: e });
-                    }
-                  }
-                  if (openBubble) groups.push({ type: "bubble", ...openBubble });
-
-                  let lastDayKey = "";
-                  const rendered: React.ReactNode[] = [];
-                  groups.forEach((g, gi) => {
-                    const evDate = new Date(
-                      g.type === "continuing" ? g.arrows[0]!.createdAt : g.event.createdAt
-                    );
-                    const dayKey = evDate.toDateString();
-                    if (dayKey !== lastDayKey) {
-                      lastDayKey = dayKey;
-                      const today = new Date();
-                      const isToday = dayKey === today.toDateString();
-                      if (!isToday) {
-                        const label = evDate.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
-                        rendered.push(
-                          <li key={`day-${dayKey}`} className="flex items-center gap-2 py-1 -mx-1 select-none">
-                            <span className="flex-1 border-t border-border/40" />
-                            <span className="text-[10px] text-muted/60 whitespace-nowrap">{label}</span>
-                            <span className="flex-1 border-t border-border/40" />
-                          </li>
-                        );
-                      }
-                    }
-                    if (g.type === "continuing") {
-                      const ctx = agentContextFor(g.arrows[0]!);
-                      rendered.push(
-                        <ActivityRow
-                          key={`continuing-${gi}`}
-                          event={g.arrows[0]!}
-                          agent={ctx.agent}
-                          model={ctx.model}
-                          arrows={g.arrows}
-                          synthetic
-                        />
-                      );
-                    } else {
-                      const ctx = agentContextFor(g.event);
-                      rendered.push(
-                        <ActivityRow
-                          key={g.event.id}
-                          event={g.event}
-                          agent={ctx.agent}
-                          model={ctx.model}
-                          arrows={g.type === "bubble" ? g.arrows : undefined}
-                        />
-                      );
-                    }
-                  });
-                  return rendered;
-                })()}
-              </ol>
-            )}
-          </Section>
-        </div>
+              <button
+                className="btn btn-sm btn-danger"
+                onClick={() => stopMut.mutate()}
+              >
+                interrupt
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Comment composer — stays at bottom of right column */}
-      <div className="shrink-0 bg-bg border-t border-border px-5 pt-3 pb-3">
-        <div className="flex gap-2 items-end">
+      {/* Tabs */}
+      <div className="sd-tabs">
+        <TabBtn id="spec" active={tab === "spec"} onClick={() => setTab("spec")}>
+          Spec
+          {openQuestions.length > 0 && (
+            <span className="sd-tab-badge attn">{openQuestions.length}</span>
+          )}
+        </TabBtn>
+        <TabBtn id="history" active={tab === "history"} onClick={() => setTab("history")}>
+          History
+          <span className="sd-tab-badge muted">{activity.length}</span>
+        </TabBtn>
+        <TabBtn id="controls" active={tab === "controls"} onClick={() => setTab("controls")}>
+          Controls
+        </TabBtn>
+        {(story.originalTitle || story.originalSpecMd) && (
+          <TabBtn id="original" active={tab === "original"} onClick={() => setTab("original")}>
+            Original
+          </TabBtn>
+        )}
+      </div>
+
+      <div className="sd-body">
+        {tab === "spec" && (
+          <SpecTab
+            story={story}
+            openQuestions={openQuestions}
+            answeredQuestions={answeredQuestions}
+            storyId={id}
+          />
+        )}
+        {tab === "history" && <HistoryTab activity={activity} workspace={workspace} />}
+        {tab === "controls" && (
+          <ControlsTab
+            story={story}
+            agents={agentsData?.agents ?? []}
+            onPatch={(body) => patchMut.mutate(body)}
+            onDispatch={() => dispatchMut.mutate()}
+            onStop={() => stopMut.mutate()}
+            onDelete={handleDelete}
+            isPending={patchMut.isPending || dispatchMut.isPending || stopMut.isPending}
+          />
+        )}
+        {tab === "original" && <OriginalTab story={story} />}
+      </div>
+
+      {/* Comment composer */}
+      <div className="sd-composer">
+        <div className="sd-composer-inner">
           <textarea
-            className="flex-1 bg-surface border border-border rounded-md px-3 py-2 text-sm text-text placeholder:text-muted resize-none"
             rows={2}
             placeholder="Comment or reply… (⌘↵ to send)"
             value={commentBody}
@@ -910,20 +691,20 @@ function StoryDetailPanel({ id }: { id: string }) {
               }
             }}
           />
-          <div className="flex flex-col gap-1.5 shrink-0">
+          <div className="sd-composer-actions">
             <button
-              className="btn btn-primary text-xs px-3"
+              className="btn btn-sm btn-primary"
               disabled={!commentBody.trim() || commentMut.isPending}
               onClick={() => commentMut.mutate()}
             >
               {commentMut.isPending ? "…" : "Send"}
             </button>
-            <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none">
+            <label className="sd-composer-interrupt">
               <input
                 type="checkbox"
                 checked={commentInterrupt}
                 onChange={(e) => setCommentInterrupt(e.target.checked)}
-                className="accent-accent"
+                style={{ accentColor: "var(--ag-impl)" }}
               />
               Interrupt
             </label>
@@ -931,347 +712,215 @@ function StoryDetailPanel({ id }: { id: string }) {
         </div>
       </div>
 
-      {/* Status dropdown — position: fixed anchored via getBoundingClientRect */}
-      {statusOpen && statusPos && (
-        <div
-          id="status-fixed-dropdown"
-          className="bg-surface2 border border-border rounded-md shadow-xl py-1 z-[9999]"
-          style={{ position: "fixed", top: statusPos.top, left: statusPos.left, width: statusPos.width }}
-        >
-          {STATUS_OPTIONS.map((s) => (
-            <button
-              key={s}
-              className="flex items-center gap-2 w-full px-3 py-1.5 text-sm hover:bg-surface transition-colors text-left cursor-pointer"
-              onClick={() => { patchMut.mutate({ status: s }); setStatusOpen(false); }}
-            >
-              <StatusDot status={s} />
-              <span className="text-text">{STATUS_LABELS[s]}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* ⋯ menu — position: fixed anchored via getBoundingClientRect */}
+      {/* ⋯ actions menu */}
       {menuOpen && menuPos && (
         <div
           id="story-actions-menu"
-          className="bg-surface2 border border-border rounded-md shadow-xl py-1 z-[9999] w-40"
-          style={{ position: "fixed", top: menuPos.top, left: menuPos.left }}
+          style={{
+            position: "fixed", top: menuPos.top, left: menuPos.left,
+            background: "var(--bg-2)", border: "1px solid var(--border-1)",
+            borderRadius: "var(--r-md)", boxShadow: "0 8px 24px rgba(0,0,0,.4)",
+            zIndex: 9999, width: 160, padding: "4px 0",
+          }}
         >
-          <button
-            className="flex items-center w-full px-3 py-1.5 text-sm hover:bg-surface transition-colors text-left cursor-pointer text-text disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={handleRespec}
-            disabled={!dispatchable || dispatchMut.isPending || patchMut.isPending}
-            title="Force re-spec: reassign to spec-writer and dispatch."
-          >
-            Re-spec
-          </button>
-          <button
-            className="flex items-center w-full px-3 py-1.5 text-sm hover:bg-surface transition-colors text-left cursor-pointer text-red-400 disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={handleDelete}
-            disabled={running || deleteMut.isPending}
-            title="Delete this story permanently"
-          >
+          <MenuBtn onClick={handleRespec} disabled={!dispatchable || dispatchMut.isPending || patchMut.isPending}>Re-spec</MenuBtn>
+          <MenuBtn onClick={handleDelete} danger disabled={running || deleteMut.isPending}>
             {deleteMut.isPending ? "Deleting…" : "Delete"}
-          </button>
+          </MenuBtn>
         </div>
       )}
     </>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Activity helpers (ported verbatim from StoryDetailPage)
-// ---------------------------------------------------------------------------
-
-function ActivityBubble({ ts, dayMarker, tsTitle, name, colors, body, bodyNode, icon, tag, footer }: { ts: string; dayMarker?: string; tsTitle: string; name: string; colors: ActorColors; body?: string; bodyNode?: ReactNode; icon?: IconDefinition; tag?: ReactNode; footer?: ReactNode }) {
-  return (
-    <li className="flex gap-2 text-xs -mx-1">
-      <div className="text-muted shrink-0 w-20 whitespace-nowrap pt-1" title={tsTitle}>
-        <div>{ts}</div>
-        {dayMarker && <div className="text-[9px] text-muted/70">{dayMarker}</div>}
-      </div>
-      <div className="flex-1 min-w-0 rounded-md border border-border bg-surface px-3 py-2 space-y-1">
-        <div className="flex items-center gap-2">
-          {icon && (
-            <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full shrink-0 ${colors.bg} ${colors.text}`}>
-              <FontAwesomeIcon icon={icon} className="text-[9px]" />
-            </span>
-          )}
-          <span className={`font-medium text-[11px] ${colors.text}`}>{name}</span>
-          {tag}
-        </div>
-        <div className="text-text break-words whitespace-pre-wrap leading-relaxed">
-          {bodyNode ?? (body !== undefined ? renderMarkdown(maybePrettyJson(body)) : null)}
-        </div>
-        {footer}
-      </div>
-    </li>
-  );
-}
-
-function ActivityRow({ event, agent, model, arrows, synthetic }: { event: ActivityEvent; agent?: string; model?: string; arrows?: ActivityEvent[]; synthetic?: boolean }) {
-  const tsDate = new Date(event.createdAt);
-  const ts = tsDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const tsTitle = tsDate.toLocaleString();
-  const today = new Date();
-  const isToday = tsDate.toDateString() === today.toDateString();
-  const dayMarker = isToday
-    ? undefined
-    : tsDate.toLocaleDateString([], { weekday: "short", month: "numeric", day: "numeric" });
-  const line = shortenHome(renderEvent(event));
-  const fullLine = shortenHome(renderEvent(event, true));
-  const isArrow = line.startsWith("→");
-  const isTriageQuestion = event.kind === "triage_question";
-  const [expanded, setExpanded] = useState(false);
-  const toggle = useCallback(() => setExpanded((v) => !v), []);
-
-  const shortAgent = (agent === "user" ? USER_LABEL : agent) ?? "";
-  const isSystemActor = event.actor === "user" || event.actor === "system" || !event.actor;
-  const shortModel = isSystemActor ? "" : (model?.replace(/^.*\//, "").replace(/^claude-/, "") ?? "");
-
-  // NB: do not introduce a local component wrapper here — its identity would
-  // change on every parent re-render, causing React to remount the entire
-  // bubble subtree and blow away browser-managed state like <details open>.
-  // Pass ts/tsTitle through to ActivityBubble explicitly instead.
-
-  // User comment (posted via comment box)
-  if (event.kind === "comment") {
-    const p = event.payload as { body?: string; interrupt?: boolean };
-    const commentName = event.actor === "user" ? USER_LABEL : event.actor;
-    return (
-      <ActivityBubble ts={ts} dayMarker={dayMarker} tsTitle={tsTitle}
-        name={commentName}
-        colors={agentColors(commentName)}
-        icon={agentIcon(commentName)}
-        body={p.body ?? ""}
-        tag={p.interrupt ? <span className="text-[10px] text-amber-400">⚡ interrupt</span> : undefined}
-      />
-    );
-  }
-
-  // agent_prompt — shown as a comment from "you" addressed to the agent
-  if (event.kind === "agent_prompt") {
-    const p = event.payload as Record<string, unknown>;
-    const targetAgent = (p.agent ?? event.actor ?? "") as string;
-    const promptBody = (p.prompt ?? p.body ?? "") as string;
-    const systemPrompt = (p.systemPrompt ?? "") as string;
-    return (
-      <ActivityBubble ts={ts} dayMarker={dayMarker} tsTitle={tsTitle}
-        name={USER_LABEL}
-        colors={agentColors(USER_LABEL)}
-        icon={agentIcon(USER_LABEL)}
-        bodyNode={
-          <>
-            {systemPrompt && (
-              <details className="mb-2 rounded border border-border/60 bg-bg/40">
-                <summary className="cursor-pointer select-none px-2 py-1 text-[11px] text-muted hover:text-text">
-                  system prompt ({systemPrompt.length.toLocaleString()} chars)
-                </summary>
-                <div className="border-t border-border/60 px-2 py-2 break-words whitespace-pre-wrap leading-relaxed">
-                  {renderMarkdown(systemPrompt)}
-                </div>
-              </details>
-            )}
-            {renderMarkdown(maybePrettyJson(`@${targetAgent}: ${promptBody}`))}
-          </>
-        }
-      />
-    );
-  }
-
-  // agent_transition — "changed actor {from} to {to}" with colored names
-  if (event.kind === "agent_transition") {
-    const p = event.payload as { from?: string | null; to?: string | null };
-    const actorName = (event.actor === "user" ? USER_LABEL : event.actor) || "system";
-    const fromName = p.from ?? "(none)";
-    const toName = p.to ?? "(none)";
-    return (
-      <ActivityBubble ts={ts} dayMarker={dayMarker} tsTitle={tsTitle}
-        name={actorName}
-        colors={agentColors(actorName)}
-        icon={agentIcon(actorName)}
-        bodyNode={
-          <span>
-            changed actor{" "}
-            <span className={agentColors(fromName).text}>{fromName}</span>
-            {" → "}
-            <span className={agentColors(toName).text}>{toName}</span>
-          </span>
-        }
-      />
-    );
-  }
-
-  // state_transition — "changed state to {status}" with bold-white status
-  if (event.kind === "state_transition") {
-    const p = event.payload as { status?: string };
-    const actorName = (event.actor === "user" ? USER_LABEL : event.actor) || "system";
-    return (
-      <ActivityBubble ts={ts} dayMarker={dayMarker} tsTitle={tsTitle}
-        name={actorName}
-        colors={agentColors(actorName)}
-        icon={agentIcon(actorName)}
-        bodyNode={
-          <span>
-            changed state to{" "}
-            <span className="font-bold text-white">{p.status ?? "unknown"}</span>
-          </span>
-        }
-      />
-    );
-  }
-
-  // agent_stream genuine text response (non-arrow) — also used for synthetic "Continuing…" bubbles
-  if (synthetic || (event.kind === "agent_stream" && !isArrow)) {
-    const label = shortModel ? `${shortAgent} (${shortModel})` : shortAgent;
-    const arrowFooter = arrows && arrows.length > 0 ? (
-      <ul className="mt-1 border-t border-border/50 pt-1 space-y-0.5">
-        {arrows.map((a) => {
-          const aLine = shortenHome(renderEvent(a, true));
-          return (
-            <li key={a.id} className="text-[11px] text-muted truncate" title={aLine}>
-              {parseInlineMarkdown(aLine)}
-            </li>
-          );
-        })}
-      </ul>
-    ) : undefined;
-    return (
-      <ActivityBubble ts={ts} dayMarker={dayMarker} tsTitle={tsTitle}
-        name={label || "agent"}
-        colors={agentColors(shortAgent)}
-        icon={agentIcon(shortAgent)}
-        body={synthetic ? "Continuing…" : fullLine}
-        footer={arrowFooter}
-      />
-    );
-  }
-
-  if (isTriageQuestion) {
-    return (
-      <li className="flex gap-2 text-xs rounded px-2 py-1.5 -mx-1 bg-amber-500/15 border border-amber-500/30">
-        <div className="text-muted shrink-0 w-20 whitespace-nowrap" title={tsTitle}>
-          <div>{ts}</div>
-          {dayMarker && <div className="text-[9px] text-muted/70">{dayMarker}</div>}
-        </div>
-        <span className="text-muted shrink-0 w-20 truncate" title={agent}>{shortAgent}</span>
-        {shortModel && <span className="text-muted shrink-0 w-24 truncate" title={model}>{shortModel}</span>}
-        <span className="shrink-0 w-28 text-amber-400 font-medium">triage question</span>
-        <div className="flex-1 min-w-0 overflow-x-auto">
-          <span className="text-amber-200 break-words whitespace-pre-wrap">{renderMarkdown(fullLine)}</span>
-        </div>
-      </li>
-    );
-  }
-
-  // Non-arrow events that are NOT agent_stream text (dispatch_completed, state_transition, etc.)
-  if (!isArrow) {
-    const display = maybePrettyJson(fullLine);
-    let changedFilesNode: ReactNode = null;
-    if (event.kind === "dispatch_completed") {
-      const payload = (event.payload ?? {}) as Record<string, unknown>;
-      const changedFiles = Array.isArray(payload.changedFiles) ? (payload.changedFiles as string[]) : [];
-      const gitDiff = typeof payload.gitDiff === "string" ? payload.gitDiff : "";
-      if (changedFiles.length === 0) {
-        changedFilesNode = (
-          <div className="text-xs text-muted mt-1">Agent touched no files under the repo root.</div>
-        );
-      } else {
-        const diffStats = parseDiffStats(gitDiff);
-        changedFilesNode = (
-          <ul className="text-xs font-mono text-text space-y-0.5 mt-1">
-            {changedFiles.map((f) => {
-              const s = diffStats.get(f);
-              return (
-                <li key={f} className="flex items-center gap-2 truncate">
-                  <span className="truncate">{f}</span>
-                  {s && (
-                    <span className="flex-shrink-0 ml-auto flex gap-1.5">
-                      {s.added > 0 && <span className="text-green-500">+{s.added}</span>}
-                      {s.removed > 0 && <span className="text-red-500">-{s.removed}</span>}
-                    </span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        );
-      }
-    }
-    return (
-      <li className="flex items-start gap-2 text-xs rounded py-1 -mx-1">
-        <div className="text-muted shrink-0 w-20 whitespace-nowrap pt-px" title={tsTitle}>
-          <div>{ts}</div>
-          {dayMarker && <div className="text-[9px] text-muted/70">{dayMarker}</div>}
-        </div>
-        <span className="text-muted shrink-0 w-20 truncate pt-px" title={agent}>{shortAgent}</span>
-        {shortModel && <span className="text-muted shrink-0 w-24 truncate pt-px" title={model}>{shortModel}</span>}
-        <span className="text-muted shrink-0 w-28 truncate pt-px">{event.kind}</span>
-        <div className="flex-1 min-w-0 overflow-x-auto">
-          <span className="text-text break-words whitespace-pre-wrap">{renderMarkdown(display)}</span>
-          {changedFilesNode}
-        </div>
-      </li>
-    );
-  }
-
-  return (
-    <li className="flex gap-2 text-xs cursor-pointer hover:bg-surface/50 rounded py-0.5 -mx-1" onClick={toggle}>
-      <div className="text-muted shrink-0 w-20 whitespace-nowrap pt-px" title={tsTitle}>
-        <div>{ts}</div>
-        {dayMarker && <div className="text-[9px] text-muted/70">{dayMarker}</div>}
-      </div>
-      <span className="text-muted shrink-0 w-20 truncate pt-px" title={agent}>{shortAgent}</span>
-      {shortModel && <span className="text-muted shrink-0 w-24 truncate pt-px" title={model}>{shortModel}</span>}
-      <span className="text-muted shrink-0 w-28 truncate pt-px">{event.kind}</span>
-      <div className={`flex-1 min-w-0 ${expanded ? "overflow-x-auto" : "overflow-hidden"}`}>
-        <span className={`text-muted ${expanded ? "break-words whitespace-pre-wrap" : "truncate block"}`}>
-          {expanded ? renderMarkdown(fullLine) : parseInlineMarkdown(line)}
-        </span>
-      </div>
-    </li>
-  );
-}
-
-function AnsweredQuestion({ question }: { question: RefinementQuestion }) {
+function MetaDropdown<T extends string>({
+  value, options, color, icon, disabled, onChange,
+}: {
+  value: T;
+  options: { value: T; label: string; color?: string; icon?: IconDefinition }[];
+  color?: string;
+  icon?: IconDefinition;
+  disabled?: boolean;
+  onChange: (v: T) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const current = options.find((o) => o.value === value);
+
+  useEffect(() => {
+    if (!open) return;
+    function handle(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, [open]);
+
   return (
-    <li className="rounded-md border border-border/60 bg-surface/60 px-3 py-2 text-xs">
+    <div ref={ref} style={{ position: "relative", display: "inline-block" }}>
       <button
-        className="w-full text-left flex items-start gap-2 hover:text-text transition-colors cursor-pointer"
-        onClick={() => setOpen((v) => !v)}
+        className="meta-drop-btn"
+        style={{ color: color ?? "var(--fg-1)", opacity: disabled ? 0.4 : 1 }}
+        onClick={() => !disabled && setOpen((v) => !v)}
+        disabled={disabled}
       >
-        <span className="text-muted shrink-0">{open ? "▾" : "▸"}</span>
-        <span className="flex-1 min-w-0">
-          <span className="text-muted line-through decoration-muted/40">
-            {question.question}
-          </span>
-        </span>
-        <span className="pill text-[10px] text-done border-done/40 shrink-0">
-          answered
-        </span>
+        {icon && <FontAwesomeIcon icon={icon} style={{ marginRight: 4, fontSize: "0.75em" }} />}
+        {current?.label ?? value}
+        <span className="meta-drop-caret">▾</span>
       </button>
       {open && (
-        <div className="mt-2 pl-4 border-l-2 border-done/30">
-          <div className="text-text whitespace-pre-wrap break-words">
-            {question.answer ?? ""}
-          </div>
-          {question.answeredAt && (
-            <div className="text-[10px] text-muted mt-1">
-              answered {new Date(question.answeredAt).toLocaleString()}
-            </div>
-          )}
+        <div className="meta-drop-menu">
+          {options.map((o) => (
+            <button
+              key={o.value}
+              className={"meta-drop-item" + (o.value === value ? " active" : "")}
+              style={o.color ? { color: o.color } : undefined}
+              onClick={() => { onChange(o.value); setOpen(false); }}
+            >
+              {o.icon && <FontAwesomeIcon icon={o.icon} style={{ marginRight: 5, fontSize: "0.75em", opacity: 0.8 }} />}
+              {o.label}
+            </button>
+          ))}
         </div>
       )}
-    </li>
+    </div>
   );
 }
 
-function QuestionForm({ question, storyId }: { question: RefinementQuestion; storyId: string }) {
+function TabBtn({ id, active, onClick, children }: { id: string; active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <span className={"sd-tab" + (active ? " active" : "")} onClick={onClick}>
+      {children}
+    </span>
+  );
+}
+
+function MenuBtn({ children, onClick, danger, disabled }: { children: React.ReactNode; onClick: () => void; danger?: boolean; disabled?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        display: "flex", width: "100%", padding: "6px 12px",
+        background: "transparent", border: 0, textAlign: "left",
+        color: danger ? "var(--attn-error)" : "var(--fg-0)",
+        fontSize: 13, cursor: disabled ? "not-allowed" : "default",
+        opacity: disabled ? 0.4 : 1,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+// ── Spec tab ──────────────────────────────────────────────────────────────────
+
+function SpecTab({
+  story,
+  openQuestions,
+  answeredQuestions,
+  storyId,
+}: {
+  story: Story;
+  openQuestions: RefinementQuestion[];
+  answeredQuestions: RefinementQuestion[];
+  storyId: string;
+}) {
+  return (
+    <>
+      {openQuestions.length > 0 && (
+        <div className="spec-banner">
+          <span className="spec-banner-dot" />
+          <span>
+            <b>{openQuestions.length}</b>{" "}
+            {openQuestions.length === 1 ? "question" : "questions"} from the spec writer — answer inline below
+          </span>
+          <span style={{ marginLeft: "auto", color: "var(--fg-3)", fontSize: 11.5 }}>⌘↵ submits</span>
+        </div>
+      )}
+
+      <div className="sd-section-title">
+        <span>Description</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      <div className="sd-prose">
+        {story.specMd ? (
+          <div style={{ color: "var(--fg-1)", fontSize: 13.5, lineHeight: 1.55 }}>
+            {renderMarkdown(story.specMd)}
+          </div>
+        ) : (
+          <p style={{ color: "var(--fg-3)" }}>(no spec yet — click Controls to edit)</p>
+        )}
+      </div>
+
+      {openQuestions.length > 0 && (
+        <>
+          <div className="sd-section-title" style={{ marginTop: 20 }}>
+            <span>Open questions</span>
+            <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+          </div>
+          {openQuestions.map((q) => (
+            <OpenQuestion key={q.id} question={q} storyId={storyId} />
+          ))}
+        </>
+      )}
+
+      {answeredQuestions.length > 0 && (
+        <>
+          <div className="sd-section-title" style={{ marginTop: 20 }}>
+            <span>Answered</span>
+            <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+          </div>
+          {answeredQuestions.map((q) => (
+            <AnsweredQuestion key={q.id} question={q} />
+          ))}
+        </>
+      )}
+    </>
+  );
+}
+
+// ── Original tab ─────────────────────────────────────────────────────────────
+
+function OriginalTab({ story }: { story: Story }) {
+  return (
+    <>
+      <div className="spec-banner" style={{ background: "var(--bg-1)", borderColor: "var(--border-0)" }}>
+        <span style={{ color: "var(--fg-3)", fontSize: 11.5 }}>
+          Read-only snapshot captured at creation, before spec-writer rewrites.
+        </span>
+      </div>
+
+      <div className="sd-section-title">
+        <span>Original title</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      <div className="sd-prose">
+        <p style={{ color: "var(--fg-1)", fontSize: 13.5, margin: 0 }}>
+          {story.originalTitle ?? <span style={{ color: "var(--fg-3)" }}>(none)</span>}
+        </p>
+      </div>
+
+      <div className="sd-section-title" style={{ marginTop: 20 }}>
+        <span>Original spec</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      <div className="sd-prose">
+        {story.originalSpecMd ? (
+          <div style={{ color: "var(--fg-1)", fontSize: 13.5, lineHeight: 1.55 }}>
+            {renderMarkdown(story.originalSpecMd)}
+          </div>
+        ) : (
+          <p style={{ color: "var(--fg-3)" }}>(no original spec captured)</p>
+        )}
+      </div>
+    </>
+  );
+}
+
+function OpenQuestion({ question, storyId }: { question: RefinementQuestion; storyId: string }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
-  const [skipping, setSkipping] = useState(false);
 
   const answerMut = useMutation({
     mutationFn: () => api.refinementQuestions.answer(question.id, draft),
@@ -1287,58 +936,479 @@ function QuestionForm({ question, storyId }: { question: RefinementQuestion; sto
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["story", storyId] });
       queryClient.invalidateQueries({ queryKey: ["refinement-questions"] });
-      setSkipping(false);
     },
   });
 
   return (
-    <li className="rounded-md border border-border bg-surface px-3 py-3 space-y-2">
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1 min-w-0">
-          <div className="text-sm text-text font-medium">{question.question}</div>
-          {question.context && (
-            <div className="text-[11px] text-muted italic mt-0.5">{question.context}</div>
-          )}
-          <div className="flex items-center gap-2 mt-1.5">
-            <span className="pill text-[10px]">{question.source}</span>
-            {question.blocksDispatch && (
-              <span className="pill text-[10px] text-cert-low border-cert-low/40">
-                blocks dispatch
-              </span>
-            )}
-          </div>
+    <div className="inline-q">
+      <div className="inline-q-head">
+        <span className="inline-q-glyph" style={{ color: "var(--ag-spec)" }}>◆</span>
+        <span className="inline-q-who">spec-writer asks</span>
+        {question.source && <span className="inline-q-time">{question.source}</span>}
+        <span className="inline-q-pending">waiting on you</span>
+      </div>
+      <div className="inline-q-text">{question.question}</div>
+      {question.context && <div className="inline-q-reason">{question.context}</div>}
+      <div className="inline-q-input">
+        <textarea
+          placeholder="answer inline…"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && draft.trim()) {
+              answerMut.mutate();
+            }
+          }}
+        />
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <button
+            className="btn btn-sm btn-primary"
+            disabled={!draft.trim() || answerMut.isPending}
+            onClick={() => { if (draft.trim()) answerMut.mutate(); }}
+          >
+            {answerMut.isPending ? "…" : "submit"}
+          </button>
+          <span
+            style={{ fontSize: 10, color: "var(--fg-3)", cursor: "default", textAlign: "center", padding: "2px 4px" }}
+            onClick={() => skipMut.mutate()}
+          >
+            skip
+          </span>
         </div>
       </div>
-      <textarea
-        className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm text-text placeholder:text-muted resize-y min-h-[64px]"
-        placeholder="Answer (⌘↵ to submit)"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && draft.trim()) {
-            answerMut.mutate();
-          }
-        }}
-      />
-      <div className="flex items-center justify-end gap-2">
-        <button
-          className="btn text-xs"
-          onClick={() => {
-            setSkipping(true);
-            skipMut.mutate();
-          }}
-          disabled={skipping || skipMut.isPending}
-        >
-          {skipMut.isPending ? "Skipping…" : "Skip (obsolete)"}
-        </button>
-        <button
-          className="btn btn-primary text-xs"
-          disabled={!draft.trim() || answerMut.isPending}
-          onClick={() => answerMut.mutate()}
-        >
-          {answerMut.isPending ? "Answering…" : "Answer"}
-        </button>
+    </div>
+  );
+}
+
+function AnsweredQuestion({ question }: { question: RefinementQuestion }) {
+  return (
+    <div className="inline-q resolved">
+      <div className="inline-q-head">
+        <span className="inline-q-glyph" style={{ color: "var(--ag-spec)" }}>◆</span>
+        <span className="inline-q-who">spec-writer asked</span>
+        {question.answeredAt && (
+          <span className="inline-q-time">{relTime(question.answeredAt)}</span>
+        )}
+        <span className="inline-q-resolved-label">✓ answered</span>
       </div>
-    </li>
+      <div className="inline-q-text">{question.question}</div>
+      {question.answer && (
+        <div className="inline-q-answer-shown">
+          <span className="inline-q-answer-label">your answer</span>
+          <span className="inline-q-answer-text">{question.answer}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── History tab ───────────────────────────────────────────────────────────────
+
+type EventGroup =
+  | { type: "bubble"; event: ActivityEvent; arrows: ActivityEvent[] }
+  | { type: "continuing"; arrows: ActivityEvent[] }
+  | { type: "other"; event: ActivityEvent };
+
+const BUBBLE_KINDS = new Set([
+  "state_transition", "agent_transition", "comment",
+  "agent_prompt", "triage_prompt", "qa_prompt", "classifier_prompt",
+]);
+
+function groupActivity(events: ActivityEvent[]): EventGroup[] {
+  const groups: EventGroup[] = [];
+  let openBubble: { event: ActivityEvent; arrows: ActivityEvent[] } | null = null;
+
+  for (const e of events) {
+    const evLine = shortenHome(renderEvent(e));
+    const isArrowRow = e.kind === "agent_stream" && evLine.startsWith("→");
+    const isBubbleKind = (e.kind === "agent_stream" && !isArrowRow) || BUBBLE_KINDS.has(e.kind);
+
+    if (isBubbleKind) {
+      if (openBubble) groups.push({ type: "bubble", ...openBubble });
+      openBubble = { event: e, arrows: [] };
+    } else if (isArrowRow) {
+      if (openBubble && openBubble.event.actor === e.actor) {
+        openBubble.arrows.push(e);
+      } else {
+        if (openBubble) { groups.push({ type: "bubble", ...openBubble }); openBubble = null; }
+        const last = groups[groups.length - 1];
+        if (last?.type === "continuing" && last.arrows[0]?.actor === e.actor) {
+          last.arrows.push(e);
+        } else {
+          groups.push({ type: "continuing", arrows: [e] });
+        }
+      }
+    } else {
+      if (openBubble) { groups.push({ type: "bubble", ...openBubble }); openBubble = null; }
+      groups.push({ type: "other", event: e });
+    }
+  }
+  if (openBubble) groups.push({ type: "bubble", ...openBubble });
+  return groups;
+}
+
+function HistoryTab({ activity, workspace }: { activity: ActivityEvent[]; workspace?: string }) {
+  const [expandAll, setExpandAll] = useState(false);
+
+  if (activity.length === 0) {
+    return (
+      <div style={{ color: "var(--fg-3)", fontSize: 12.5, padding: 12, fontFamily: "var(--mono)" }}>
+        no activity yet — dispatch to start
+      </div>
+    );
+  }
+
+  const events = [...activity].reverse();
+  const groups = groupActivity(events);
+
+  return (
+    <div className="hist">
+      <div className="hist-toolbar">
+        <span>{groups.length} events</span>
+        <span style={{ color: "var(--fg-4)" }}>·</span>
+        <span style={{ marginLeft: "auto" }}>
+          <button className="btn btn-sm" onClick={() => setExpandAll(true)}>expand all</button>
+        </span>
+        <span>
+          <button className="btn btn-sm" onClick={() => setExpandAll(false)}>collapse</button>
+        </span>
+      </div>
+      {groups.map((g, i) => {
+        if (g.type === "continuing") {
+          return (
+            <HistoryEvent
+              key={`continuing-${i}`}
+              event={g.arrows[0]!}
+              arrows={g.arrows}
+              forceOpen={expandAll}
+              workspace={workspace}
+              synthetic
+            />
+          );
+        }
+        return (
+          <HistoryEvent
+            key={g.type === "other" ? g.event.id : g.event.id}
+            event={g.type === "other" ? g.event : g.event}
+            arrows={g.type === "bubble" ? g.arrows : undefined}
+            forceOpen={expandAll}
+            workspace={workspace}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function HistoryEvent({
+  event, forceOpen, workspace, arrows, synthetic,
+}: {
+  event: ActivityEvent;
+  forceOpen: boolean;
+  workspace?: string;
+  arrows?: ActivityEvent[];
+  synthetic?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const isOpen = forceOpen || open;
+
+  const tsDate = new Date(event.createdAt);
+  const ts = tsDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  const actorName = event.actor === "user" ? USER_LABEL : event.actor;
+  const agentCfg = actorName ? { ...resolveAgentDisplay(actorName), label: actorName } : null;
+
+  const line = shortenHome(renderEvent(event));
+  const fullLine = shortenHome(renderEvent(event, true));
+  const isArrow = line.startsWith("→");
+
+  let content: string;
+  if (synthetic) {
+    content = "Continuing…";
+  } else if (event.kind === "state_transition") {
+    const p = event.payload as { status?: string };
+    content = `→ ${p.status ?? "unknown"}`;
+  } else if (event.kind === "agent_transition") {
+    const p = event.payload as { from?: string | null; to?: string | null };
+    content = `${p.from ?? "(none)"} → ${p.to ?? "(none)"}`;
+  } else if (event.kind === "comment") {
+    const p = event.payload as { body?: string };
+    content = p.body ?? "";
+  } else {
+    content = isArrow ? line.slice(2) : fullLine;
+  }
+
+  const PROMPT_KINDS = ["agent_prompt", "triage_prompt", "qa_prompt", "classifier_prompt"];
+  const isPromptEvent = PROMPT_KINDS.includes(event.kind);
+  const displayLine = content.length > 120 ? content.slice(0, 120) + "…" : content;
+  const hasDetail = fullLine.length > 80 || event.kind === "dispatch_completed" || isPromptEvent;
+  const hasArrows = arrows && arrows.length > 0;
+
+  return (
+    <div className={"hist-evt" + (isOpen ? " open" : "") + (hasDetail ? " has-packet" : "")}>
+      <div className="hist-evt-head" onClick={hasDetail ? () => setOpen((v) => !v) : undefined}>
+        <span className="hist-evt-t">{ts}</span>
+        <span className="hist-evt-glyph" style={{ color: agentCfg?.color ?? "var(--fg-3)" }}>
+          {agentCfg ? <FontAwesomeIcon icon={agentCfg.icon} /> : "·"}
+        </span>
+        <span className="hist-evt-who" style={{ color: agentCfg?.color ?? "var(--fg-0)" }}>
+          {agentCfg?.label ?? actorName ?? event.kind}
+        </span>
+        <div>
+          <span className="hist-evt-text">{displayLine}</span>
+          {hasArrows && (
+            <div className="hist-evt-arrows">
+              {arrows.map((a) => (
+                <div key={a.id} className="hist-evt-arrow-row" title={shortenHome(renderEvent(a, true))}>
+                  {shortenHome(renderEvent(a, true))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <span />
+        {hasDetail && <span className="hist-evt-chev">{isOpen ? "▾" : "▸"}</span>}
+      </div>
+      {isOpen && hasDetail && (
+        <div className="packet">
+          {event.kind === "dispatch_completed" ? (
+            <DispatchCompletedDetail event={event} />
+          ) : isPromptEvent ? (
+            <PromptDetail event={event} />
+          ) : (
+            <pre className="packet-pre" style={{ margin: 0 }}>
+              {fullLine}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PromptDetail({ event }: { event: ActivityEvent }) {
+  const p = (event.payload ?? {}) as Record<string, unknown>;
+  const systemPrompt = typeof p.systemPrompt === "string" ? p.systemPrompt : null;
+  const prompt = typeof p.prompt === "string" ? p.prompt : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {systemPrompt && (
+        <div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            System Prompt
+          </div>
+          <pre className="packet-pre" style={{ margin: 0 }}>{systemPrompt}</pre>
+        </div>
+      )}
+      {prompt && (
+        <div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-3)", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Prompt
+          </div>
+          <pre className="packet-pre" style={{ margin: 0 }}>{prompt}</pre>
+        </div>
+      )}
+      {!systemPrompt && !prompt && (
+        <pre className="packet-pre" style={{ margin: 0 }}>{JSON.stringify(p, null, 2)}</pre>
+      )}
+    </div>
+  );
+}
+
+function DispatchCompletedDetail({ event }: { event: ActivityEvent }) {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const changedFiles = Array.isArray(payload.changedFiles) ? (payload.changedFiles as string[]) : [];
+  const gitDiff = typeof payload.gitDiff === "string" ? payload.gitDiff : "";
+  const diffStats = parseDiffStats(gitDiff);
+
+  if (changedFiles.length === 0) {
+    return <div style={{ color: "var(--fg-3)", fontSize: 12 }}>Agent touched no files.</div>;
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {changedFiles.map((f) => {
+        const s = diffStats.get(f);
+        return (
+          <div key={f} style={{ display: "flex", gap: 10, alignItems: "center", fontFamily: "var(--mono)", fontSize: 11.5 }}>
+            <span style={{ color: "var(--fg-0)", flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{f}</span>
+            {s?.added ? <span style={{ color: "var(--ag-impl)" }}>+{s.added}</span> : null}
+            {s?.removed ? <span style={{ color: "var(--attn-error)" }}>-{s.removed}</span> : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Controls tab ──────────────────────────────────────────────────────────────
+
+interface ControlsTabProps {
+  story: Story;
+  agents: { name: string }[];
+  onPatch: (body: { title?: string; specMd?: string; status?: StoryStatus; agent?: string | null }) => void;
+  onDispatch: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  isPending: boolean;
+}
+
+function ControlsTab({ story, agents, onPatch, onDispatch, onStop, onDelete, isPending }: ControlsTabProps) {
+  const [editingSpec, setEditingSpec] = useState(false);
+  const [specDraft, setSpecDraft] = useState(story.specMd);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(story.title);
+  const specRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (editingSpec) specRef.current?.focus();
+  }, [editingSpec]);
+
+  const running = story.status === "implementing";
+  const dispatchable = story.status !== "implementing";
+
+  return (
+    <>
+      <div className="sd-section-title">
+        <span>Title</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      <div className="ctrl-group">
+        <div className="ctrl-row">
+          <span className="ctrl-key">Title</span>
+          {editingTitle ? (
+            <input
+              style={{
+                background: "var(--bg-0)", border: "1px solid var(--border-1)",
+                borderRadius: "var(--r-sm)", color: "var(--fg-0)", font: "inherit",
+                fontSize: 13, padding: "3px 8px", outline: "none", width: "100%",
+              }}
+              value={titleDraft}
+              autoFocus
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => {
+                if (titleDraft.trim() && titleDraft !== story.title) onPatch({ title: titleDraft.trim() });
+                setEditingTitle(false);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setEditingTitle(false);
+                if (e.key === "Enter") {
+                  if (titleDraft.trim() && titleDraft !== story.title) onPatch({ title: titleDraft.trim() });
+                  setEditingTitle(false);
+                }
+              }}
+            />
+          ) : (
+            <span className="ctrl-val" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{story.title}</span>
+          )}
+          <button className="btn btn-sm" onClick={() => { setTitleDraft(story.title); setEditingTitle(true); }}>edit</button>
+        </div>
+      </div>
+
+      <div className="sd-section-title">
+        <span>Spec</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      {editingSpec ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+          <textarea
+            ref={specRef}
+            style={{
+              background: "var(--bg-0)", border: "1px solid var(--border-1)",
+              borderRadius: "var(--r-md)", color: "var(--fg-0)", font: "inherit",
+              fontSize: 13, padding: "10px 12px", outline: "none",
+              resize: "vertical", minHeight: 200, lineHeight: 1.55,
+            }}
+            value={specDraft}
+            onChange={(e) => setSpecDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setEditingSpec(false);
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                if (specDraft !== story.specMd) onPatch({ specMd: specDraft });
+                setEditingSpec(false);
+              }
+            }}
+          />
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn btn-sm btn-primary" onClick={() => { if (specDraft !== story.specMd) onPatch({ specMd: specDraft }); setEditingSpec(false); }}>Save</button>
+            <button className="btn btn-sm" onClick={() => setEditingSpec(false)}>Cancel</button>
+            {running && <span style={{ fontSize: 11, color: "var(--attn-high)", alignSelf: "center" }}>Saving will interrupt the running agent.</span>}
+          </div>
+        </div>
+      ) : (
+        <div className="ctrl-group">
+          <div className="ctrl-row" style={{ gridTemplateColumns: "1fr auto" }}>
+            <span className="ctrl-val" style={{ fontSize: 12, color: "var(--fg-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {story.specMd ? story.specMd.slice(0, 80) + (story.specMd.length > 80 ? "…" : "") : "(empty)"}
+            </span>
+            <button className="btn btn-sm" onClick={() => { setSpecDraft(story.specMd); setEditingSpec(true); }}>edit</button>
+          </div>
+        </div>
+      )}
+
+      <div className="sd-section-title">
+        <span>Stage</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      <div className="ctrl-group">
+        <div className="ctrl-row">
+          <span className="ctrl-key">Force stage</span>
+          <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {STATUS_ALL.map((s) => (
+              <span
+                key={s}
+                className={"pill" + (s === story.status ? " active" : "")}
+                style={{
+                  color: STAGE_CONFIG[s]?.color,
+                  cursor: "default",
+                  opacity: s === story.status ? 1 : 0.55,
+                  fontSize: 10.5,
+                }}
+                onClick={() => s !== story.status && onPatch({ status: s })}
+              >
+                <span className="pill-dot" />
+                {STAGE_CONFIG[s]?.short ?? s}
+              </span>
+            ))}
+          </span>
+          <span className="ctrl-hint">override</span>
+        </div>
+      </div>
+
+      <div className="sd-section-title">
+        <span>Agent</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      <div className="ctrl-group">
+        <div className="ctrl-row">
+          <span className="ctrl-key">Assigned agent</span>
+          <select
+            style={{
+              background: "var(--bg-0)", border: "1px solid var(--border-1)",
+              borderRadius: "var(--r-sm)", color: "var(--fg-0)", font: "inherit",
+              fontSize: 12, padding: "3px 8px", outline: "none",
+            }}
+            value={story.agent ?? ""}
+            onChange={(e) => onPatch({ agent: e.target.value || null })}
+            disabled={running || isPending}
+          >
+            <option value="">(unassigned)</option>
+            {agents.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)}
+          </select>
+          <span />
+        </div>
+      </div>
+
+      <div className="sd-section-title">
+        <span>Dispatch</span>
+        <span style={{ flex: 1, height: 1, background: "var(--border-0)" }} />
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {running && (
+          <button className="btn btn-sm btn-danger" onClick={onStop}>stop agent</button>
+        )}
+      </div>
+    </>
   );
 }
