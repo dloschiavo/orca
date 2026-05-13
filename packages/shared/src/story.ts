@@ -1,9 +1,10 @@
 export type StoryStatus =
   | "icebox"
+  | "planning"
   | "backlog"
-  | "in_progress"
-  | "in_qa"
-  | "final_review"
+  | "implementing"
+  | "qa"
+  | "review"
   | "blocked"
   | "done"
   | "canceled";
@@ -40,4 +41,8 @@ export interface Story {
   totalTokensUsed: number | null;
   claudeSessionId: string | null;
   lastActivityAt: string | null;
+  // True iff this story has at least one open refinement question whose
+  // blocksDispatch=true. Server-decorated on the list endpoint so the UI
+  // can pulse the status dot without a per-row round-trip.
+  hasOpenBlockingQuestion?: boolean;
 }

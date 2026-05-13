@@ -357,6 +357,46 @@ UPDATE stories SET status = 'backlog' WHERE status = 'todo';
 -- 'in_review' renamed to 'final_review'; 'in_qa' added as the step before it.
 UPDATE stories SET status = 'final_review' WHERE status = 'in_review';
 
+-- Spec-writer-first workflow vocabulary (2026-05):
+--   in_progress  → implementing  (more specific verb)
+--   in_qa        → qa            (drop in_ prefix to match peers)
+--   final_review → review        (drop final_, the only review is final)
+-- Also adds a new 'planning' status used while spec-writer owns the back-
+-- and-forth with the user. Idempotent.
+UPDATE stories SET status = 'implementing' WHERE status = 'in_progress';
+UPDATE stories SET status = 'qa'           WHERE status = 'in_qa';
+UPDATE stories SET status = 'review'       WHERE status = 'final_review';
+
+-- Rewrite state_transition payloads so the historical activity log shows
+-- the new vocabulary instead of orphaned old strings. Both 'status' and
+-- 'from' fields are touched. Idempotent.
+UPDATE activity_events SET payload = jsonb_set(payload, '{status}', '"implementing"', false)
+  WHERE kind = 'state_transition' AND payload->>'status' = 'in_progress';
+UPDATE activity_events SET payload = jsonb_set(payload, '{status}', '"qa"', false)
+  WHERE kind = 'state_transition' AND payload->>'status' = 'in_qa';
+UPDATE activity_events SET payload = jsonb_set(payload, '{status}', '"review"', false)
+  WHERE kind = 'state_transition' AND payload->>'status' = 'final_review';
+UPDATE activity_events SET payload = jsonb_set(payload, '{from}', '"implementing"', false)
+  WHERE kind = 'state_transition' AND payload->>'from' = 'in_progress';
+UPDATE activity_events SET payload = jsonb_set(payload, '{from}', '"qa"', false)
+  WHERE kind = 'state_transition' AND payload->>'from' = 'in_qa';
+UPDATE activity_events SET payload = jsonb_set(payload, '{from}', '"review"', false)
+  WHERE kind = 'state_transition' AND payload->>'from' = 'final_review';
+
+-- Retire the triage agent. Spec-writer is now the canonical first pass for
+-- every story; the triage agent has nothing left to do. Migrate any stories
+-- still assigned to it before deleting the row. Idempotent.
+UPDATE stories                SET agent      = 'spec-writer' WHERE agent      = 'triage';
+UPDATE project_rider_sections SET agent_name = 'spec-writer' WHERE agent_name = 'triage';
+UPDATE activity_events        SET actor      = 'spec-writer' WHERE actor      IN ('triage', 'triage-agent');
+DELETE FROM agents WHERE name = 'triage';
+
+-- refinement_questions.acceptance_card_id was NOT NULL because the original
+-- producer (scrum-master) always operates relative to an acceptance card.
+-- Spec-writer now also writes rows here, and runs before any acceptance card
+-- exists, so the column needs to be nullable. Idempotent.
+ALTER TABLE refinement_questions ALTER COLUMN acceptance_card_id DROP NOT NULL;
+
 -- Audit: 'unreviewed' renamed to 'unaudited' (clearer: we haven't checked
 -- the codebase yet). 'implementing' is gone — that's a story-workflow state,
 -- not a state of the codebase. We don't know whether the work shipped, so
@@ -434,7 +474,6 @@ VALUES
   ('explorer',       1, 'Pure research — no edits permitted.',            false),
   ('classifier',     1, 'Routes every finding to an upstream cause.',     false),
   ('compactor',      1, 'Rewrites Working Memory each heartbeat tick.',   false),
-  ('triage',         1, 'Classifies incoming stories and assigns agents.', false),
   ('auditor',        1, 'Audits codebase against recipe specs; creates stories for gaps.', false)
 ON CONFLICT (name, version) DO NOTHING;
 
@@ -444,8 +483,9 @@ ON CONFLICT (name, version) DO NOTHING;
 -- be dropped manually when convenient.
 
 -- Normalize old actor names in activity_events so the invocations endpoint
--- can find historical events by current agent name.
-UPDATE activity_events SET actor = 'triage' WHERE actor = 'triage-agent';
+-- can find historical events by current agent name. The triage→spec-writer
+-- migration above already handled the historical 'triage' and 'triage-agent'
+-- actors, so nothing remains here for those.
 UPDATE activity_events SET actor = 'reviewer' WHERE actor = 'qa-agent';
 UPDATE activity_events SET actor = 'frontend' WHERE actor = 'claude-local' AND kind IN ('agent_prompt', 'dispatch_completed')
   AND story_id IN (SELECT id FROM stories WHERE agent = 'frontend');

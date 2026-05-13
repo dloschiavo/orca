@@ -235,7 +235,6 @@ export function agentsRoutes(): Hono<OrcaEnv> {
     // For historical data, _started events serve as proxy for prompt when
     // _prompt events don't exist yet.
     const kindMap: Record<string, { prompt: string[]; completed: string[] }> = {
-      triage: { prompt: ["triage_prompt", "triage_started"], completed: ["triage_completed"] },
       reviewer: { prompt: ["qa_prompt", "qa_started"], completed: ["qa_completed"] },
       classifier: { prompt: ["classifier_prompt", "classifier_started"], completed: ["classifier_completed"] },
     };

@@ -9,17 +9,6 @@ export interface StreamBlock {
   is_error?: boolean;
 }
 
-export interface CompletionPayload {
-  exitCode: number | null;
-  changedFiles: string[];
-  fileCount: number;
-  gitDiff: string;
-  cumulativeDiff: string;
-  completedAt: string;
-  totalCostUsd: number | null;
-  totalTokensUsed: number | null;
-}
-
 export function shortenHome(p: string): string {
   return p.replace(/\/Users\/[^/]+/g, "~");
 }
@@ -78,6 +67,18 @@ export function isHideableToolUse(
   return false;
 }
 
+function sumUsageTokens(usage: unknown): number {
+  if (!usage || typeof usage !== "object") return 0;
+  const u = usage as Record<string, unknown>;
+  const inTok = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+  const outTok = typeof u.output_tokens === "number" ? u.output_tokens : 0;
+  const crTok =
+    typeof u.cache_read_input_tokens === "number" ? u.cache_read_input_tokens : 0;
+  const ccTok =
+    typeof u.cache_creation_input_tokens === "number" ? u.cache_creation_input_tokens : 0;
+  return inTok + outTok + crTok + ccTok;
+}
+
 export function renderStreamEvent(p: Record<string, unknown>, full = false): string {
   const type = p.type as string | undefined;
   if (type === "system") {
@@ -96,7 +97,10 @@ export function renderStreamEvent(p: Record<string, unknown>, full = false): str
         parts.push(`→ ${name}${target ? ` ${target}` : ""}`);
       }
     }
-    return parts.join(" · ") || "assistant";
+    const msg = p.message as Record<string, unknown> | undefined;
+    const tokenTotal = sumUsageTokens(msg?.usage);
+    const body = parts.join(" · ") || "assistant";
+    return tokenTotal > 0 ? `${body} · ${formatTokens(tokenTotal)}` : body;
   }
   if (type === "user") {
     const content = extractContent(p);
@@ -110,9 +114,10 @@ export function renderStreamEvent(p: Record<string, unknown>, full = false): str
   }
   if (type === "result") {
     const cost = p.total_cost_usd;
+    const tokenTotal = sumUsageTokens(p.usage);
     return `result: ${(p.subtype as string) ?? "?"}${
       typeof cost === "number" ? ` · $${cost.toFixed(4)}` : ""
-    }`;
+    }${tokenTotal > 0 ? ` · ${formatTokens(tokenTotal)}` : ""}`;
   }
   if (type === "rate_limit_event") {
     return full ? JSON.stringify(p, null, 2) : JSON.stringify(p);
@@ -255,25 +260,4 @@ export function parseDiffStats(diff: string): Map<string, { added: number; remov
     }
   }
   return stats;
-}
-
-/** Return all dispatch_completed events as structured payloads, oldest-first. */
-export function findAllCompletions(events: ActivityEvent[]): CompletionPayload[] {
-  const results: CompletionPayload[] = [];
-  for (const e of events) {
-    if (e.kind !== "dispatch_completed") continue;
-    const p = e.payload as Record<string, unknown>;
-    results.push({
-      exitCode: typeof p.exitCode === "number" ? p.exitCode : null,
-      changedFiles: Array.isArray(p.changedFiles) ? (p.changedFiles as string[]) : [],
-      fileCount: typeof p.fileCount === "number" ? p.fileCount : 0,
-      gitDiff: typeof p.gitDiff === "string" ? p.gitDiff : "",
-      cumulativeDiff: typeof p.cumulativeDiff === "string" ? p.cumulativeDiff : "",
-      completedAt: e.createdAt,
-      totalCostUsd: typeof p.totalCostUsd === "number" ? p.totalCostUsd : null,
-      totalTokensUsed: typeof p.totalTokensUsed === "number" ? p.totalTokensUsed : null,
-    });
-  }
-  results.reverse();
-  return results;
 }

@@ -27,9 +27,13 @@ export const refinementQuestions = pgTable(
     storyId: uuid("story_id")
       .notNull()
       .references(() => stories.id, { onDelete: "cascade" }),
-    acceptanceCardId: uuid("acceptance_card_id")
-      .notNull()
-      .references(() => acceptanceCards.id, { onDelete: "cascade" }),
+    // Nullable — spec-writer writes questions before any acceptance card
+    // exists, so the FK is optional. The original producer (scrum-master)
+    // still always supplies one.
+    acceptanceCardId: uuid("acceptance_card_id").references(
+      () => acceptanceCards.id,
+      { onDelete: "cascade" },
+    ),
     stepId: text("step_id"), // nullable — question may be about the whole card
     source: text("source").$type<RefinementQuestionSource>().notNull(),
     question: text("question").notNull(),

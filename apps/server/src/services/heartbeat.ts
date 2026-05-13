@@ -1,4 +1,4 @@
-import { eq, and, isNotNull, sql, asc, inArray } from "drizzle-orm";
+import { eq, and, isNotNull, sql, inArray } from "drizzle-orm";
 import { schema } from "@orca/db";
 import type { OrcaDb, DispatchState } from "@orca/db";
 import type { StoryStatus } from "@orca/shared";
@@ -6,6 +6,7 @@ import { runClaudeDispatch, isDispatchLifecycleActive } from "../routes/stories.
 import { resolveModelForStory } from "../agents/model.js";
 import { isConcurrencyExceeded, countClaudeProcesses, getConcurrencyCap, isRateLimited, getRateLimitInfo } from "./concurrency.js";
 import { handleDispatchRejection } from "./dispatch-rejection.js";
+import { getThrottleSettings } from "./throttle.js";
 
 const MAX_FAIL_COUNT = 3;
 
@@ -30,6 +31,49 @@ async function recoverStory(
   reason: "dead_pid" | "stale",
   deadPid: number | null,
 ): Promise<void> {
+  // Dispatch gate: if the story has open blocking refinement questions,
+  // recovering is just going to burn tokens on an agent that has already
+  // asked the question and can't make progress. Revert the row to
+  // `planning` and exit — the on-answer hook (or the user's manual Re-spec
+  // button) will pick the story back up when there's actually new input.
+  const [blocker] = await db
+    .select({ id: schema.refinementQuestions.id })
+    .from(schema.refinementQuestions)
+    .where(
+      and(
+        eq(schema.refinementQuestions.storyId, story.id),
+        eq(schema.refinementQuestions.status, "open"),
+        eq(schema.refinementQuestions.blocksDispatch, true),
+      ),
+    )
+    .limit(1);
+  if (blocker) {
+    console.log(
+      `[orca/heartbeat] story ${story.id} (${reason}) has open blocking question(s) — parking in planning instead of recovering`,
+    );
+    await db
+      .update(schema.stories)
+      .set({
+        status: "planning" as StoryStatus,
+        dispatchPid: null,
+        dispatchedAt: null,
+        dispatchState: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.stories.id, story.id));
+    await db.insert(schema.activityEvents).values({
+      storyId: story.id,
+      kind: "state_transition",
+      actor: "heartbeat",
+      payload: {
+        status: "planning",
+        from: story.status,
+        reason: "blocked_by_open_question",
+      },
+    });
+    return;
+  }
+
   const newFailCount = story.dispatchFailCount + 1;
 
   // Log recovery event.
@@ -109,7 +153,7 @@ async function recoverStory(
       adapter: "claude-local",
       trigger: "heartbeat-recovery",
       attempt: newFailCount + 1,
-      agent: story.agent ?? "triage",
+      agent: story.agent ?? "spec-writer",
       ...(recoveryModel ? { model: recoveryModel } : {}),
     },
   });
@@ -179,16 +223,14 @@ async function recoverStory(
  */
 async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
   // ── 1. Dead-PID detection ──────────────────────────────────────────
-  // Find in_progress stories that have a PID attached.
+  // Find any story with a tracked dispatchPid, regardless of status.
+  // Heartbeat does not own status — its only mutex for "this story is
+  // actively dispatched" is `dispatchPid IS NOT NULL` plus the in-memory
+  // activeLifecycles guard. The agent is responsible for setting status.
   const storiesWithPid = await db
     .select()
     .from(schema.stories)
-    .where(
-      and(
-        eq(schema.stories.status, "in_progress" as StoryStatus),
-        isNotNull(schema.stories.dispatchPid),
-      ),
-    );
+    .where(isNotNull(schema.stories.dispatchPid));
 
   // Track which story IDs we already handled so we don't double-recover.
   const handledIds = new Set<string>();
@@ -281,14 +323,19 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
   }
 
   // ── 2. Stale-activity detection ────────────────────────────────────
-  // Find in_progress stories whose most recent activity event is older than
-  // one heartbeat interval ago. These may have a hung or silently-dead agent.
-  const cutoff = new Date(Date.now() - intervalMs);
+  // Find stories with a tracked dispatchPid whose most recent activity
+  // event is older than the stale-activity threshold. Pinned to an
+  // absolute 5min duration so dropping the picker cadence to 1min doesn't
+  // reap legitimately-thinking agents (slow first token, model warmup,
+  // multi-turn tool calls). As with dead-PID detection, the mutex is
+  // dispatchPid presence — status is owned by the agent, not heartbeat.
+  const STALE_ACTIVITY_THRESHOLD_MS = 5 * 60 * 1000;
+  const cutoff = new Date(Date.now() - STALE_ACTIVITY_THRESHOLD_MS);
 
   const allInProgress = await db
     .select()
     .from(schema.stories)
-    .where(eq(schema.stories.status, "in_progress" as StoryStatus));
+    .where(isNotNull(schema.stories.dispatchPid));
 
   for (const story of allInProgress) {
     if (handledIds.has(story.id)) continue;
@@ -353,46 +400,251 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
     );
   } else {
     // Automated statuses — heartbeat dispatches the assigned agent for these.
-    // `backlog` = new story waiting for its first agent. `in_qa` = do-er
-    // finished and qa-tester is next. `final_review` is intentionally excluded
-    // — it's a human gate, not an automation state. `in_progress`, `done`,
-    // `canceled`, `blocked`, `icebox` are never picked up here. Agents can
-    // still hand off explicitly via POST /api/stories/:id/wake to skip the
-    // next heartbeat interval.
-    const openStories = await db
+    //   `icebox`       = committed but not yet specced → spec-writer.
+    //   `planning`     = spec-writer owns the back-and-forth with the user;
+    //                    re-pick on each tick so it can incorporate answers.
+    //   `backlog`      = spec complete, ready for implementing agent.
+    //   `qa`           = implementing finished, qa-tester is next.
+    // `review` is intentionally excluded — it's a human gate, not an
+    // automation state. `implementing`, `done`, `canceled`, `blocked` are
+    // never picked up here. Agents can still hand off explicitly via POST
+    // /api/stories/:id/wake to skip the next heartbeat interval.
+    const openStoriesRaw = await db
       .select()
       .from(schema.stories)
       .where(
         inArray(schema.stories.status, [
+          "icebox",
+          "planning",
           "backlog",
-          "in_qa",
+          "qa",
         ] as StoryStatus[]),
-      )
-      .orderBy(asc(schema.stories.createdAt));
+      );
 
-    // Assign triage to any story that has no agent set.
+    // Dispatch gate: a story with any open blocking refinement question must
+    // NOT be auto-dispatched. The agent's last pass already asked the
+    // question — re-running it on the next tick burns tokens with no new
+    // information. The on-answer hook in /api/refinement-questions handles
+    // re-dispatch the moment the user actually answers the last blocker;
+    // until then, the story sits. The manual Dispatch / Re-spec button on
+    // the story page can still force a run when the user wants to redirect
+    // the agent regardless of question state.
+    const blockedRows = openStoriesRaw.length
+      ? await db
+          .selectDistinct({
+            storyId: schema.refinementQuestions.storyId,
+          })
+          .from(schema.refinementQuestions)
+          .where(
+            and(
+              inArray(
+                schema.refinementQuestions.storyId,
+                openStoriesRaw.map((s) => s.id),
+              ),
+              eq(schema.refinementQuestions.status, "open"),
+              eq(schema.refinementQuestions.blocksDispatch, true),
+            ),
+          )
+      : [];
+    const blockedByQuestionIds = new Set(blockedRows.map((r) => r.storyId));
+    if (blockedByQuestionIds.size > 0) {
+      console.log(
+        `[orca/heartbeat] gate: ${blockedByQuestionIds.size} stor${
+          blockedByQuestionIds.size === 1 ? "y has" : "ies have"
+        } open blocking question(s) — skipping auto-dispatch`,
+      );
+    }
+
+    // Order eligible stories by total past token usage descending, so stories
+    // with the most work already invested get finished out before fresh ones
+    // are picked up. Avoids bouncing between partially-done tasks. createdAt
+    // ascending is the tiebreaker for stories with no token history yet.
+    const storyIds = openStoriesRaw.map((s) => s.id);
+    const tokenSums = storyIds.length
+      ? await db
+          .select({
+            storyId: schema.tokenHeatmaps.storyId,
+            totalTokens: sql<string>`COALESCE(SUM(${schema.tokenHeatmaps.totalIn} + ${schema.tokenHeatmaps.totalOut}), 0)`,
+          })
+          .from(schema.tokenHeatmaps)
+          .where(inArray(schema.tokenHeatmaps.storyId, storyIds))
+          .groupBy(schema.tokenHeatmaps.storyId)
+      : [];
+    const tokensByStory = new Map<string, number>(
+      tokenSums.map((t) => [t.storyId, Number(t.totalTokens)]),
+    );
+    const openStories = [...openStoriesRaw].sort((a, b) => {
+      const ta = tokensByStory.get(a.id) ?? 0;
+      const tb = tokensByStory.get(b.id) ?? 0;
+      if (ta !== tb) return tb - ta;
+      return a.createdAt.getTime() - b.createdAt.getTime();
+    });
+
+    // Default any story with no agent to spec-writer. Spec-writer is now the
+    // canonical first pass for every story — it atomizes the spec, surfaces
+    // refinement questions, and splits multi-agent work into sibling stories
+    // before any implementing agent burns tokens.
     for (const story of openStories.filter((s) => !s.agent)) {
       await db
         .update(schema.stories)
-        .set({ agent: "triage", updatedAt: new Date() })
+        .set({ agent: "spec-writer", updatedAt: new Date() })
         .where(eq(schema.stories.id, story.id));
     }
 
-    // Filter to stories not already running in this Node process.
+    // Filter to stories not already running in this Node process and not
+    // gated by an open blocking refinement question. Log lifecycle-gated
+    // exclusions so a wedged story (phantom `activeLifecycles` entry, or
+    // a legitimately-running dispatch we silently passed over) shows up
+    // in heartbeat logs instead of having to be reverse-engineered from
+    // activity events.
     const dispatchable = openStories
-      .map((s) => (s.agent ? s : { ...s, agent: "triage" }))
-      .filter((s) => !isDispatchLifecycleActive(s.id));
+      .map((s) => (s.agent ? s : { ...s, agent: "spec-writer" }))
+      .filter((s) => {
+        if (isDispatchLifecycleActive(s.id)) {
+          console.log(
+            `[orca/heartbeat] pickup skipped story ${s.id} (status=${s.status}, agent=${s.agent}) — lifecycle active in this process`,
+          );
+          return false;
+        }
+        return true;
+      })
+      .filter((s) => !blockedByQuestionIds.has(s.id));
 
     // How many slots are free?
     const slots = getConcurrencyCap() - countClaudeProcesses();
 
-    // Dispatch assigned stories up to the concurrency cap.
+    // Load throttle settings and count currently-dispatching stories. The
+    // mutex is `dispatchPid IS NOT NULL` — not status — because heartbeat
+    // doesn't change status. A story is "actively dispatched" if it has a
+    // tracked PID (set inside runClaudeDispatch as soon as the spawn lands).
+    const throttle = await getThrottleSettings(db);
+    const currentlyInProgress = await db
+      .select({
+        id: schema.stories.id,
+        projectId: schema.stories.projectId,
+        agent: schema.stories.agent,
+        status: schema.stories.status,
+      })
+      .from(schema.stories)
+      .where(isNotNull(schema.stories.dispatchPid));
+
+    // Mutable counters: updated as we dispatch so per-story checks stay accurate.
+    let throttleTotalInProgress = currentlyInProgress.length;
+    const throttleByProject = new Map<string, number>();
+    // Count of QA-tester agents actively running. QA spikes system load —
+    // cap how many can run simultaneously.
+    let throttleQaInProgress = currentlyInProgress.filter(
+      (s) => s.agent === "qa-tester",
+    ).length;
+    // Count of spec-writer agents actively running. Capped separately
+    // because spec-writer dispatches are independent of the implementing
+    // pipeline — they don't compete for per-project slots but the system
+    // has its own ceiling.
+    let throttleSpecWriterInProgress = currentlyInProgress.filter(
+      (s) => s.agent === "spec-writer",
+    ).length;
+    for (const s of currentlyInProgress) {
+      throttleByProject.set(
+        s.projectId,
+        (throttleByProject.get(s.projectId) ?? 0) + 1,
+      );
+    }
+
+    // Dispatch assigned stories up to the concurrency cap and throttle limits.
     if (slots > 0) {
       const assigned = dispatchable.filter((s) => !!s.agent);
       let dispatched = 0;
 
       for (const story of assigned) {
         if (dispatched >= slots) break;
+
+        // Spec-writer dispatches don't compete with implementing-pipeline
+        // slots — they have their own concurrency cap. Skip the implementing
+        // throttles entirely for them.
+        const isSpecWriter = story.agent === "spec-writer";
+
+        // ── Throttle: spec-writer concurrent cap ───────────────────
+        if (
+          isSpecWriter &&
+          throttleSpecWriterInProgress >= throttle.maxConcurrentSpecWriter
+        ) {
+          console.log(
+            `[orca/heartbeat] spec-writer-throttle: running (${throttleSpecWriterInProgress}) >= maxConcurrentSpecWriter (${throttle.maxConcurrentSpecWriter}), deferring story ${story.id}`,
+          );
+          await db.insert(schema.activityEvents).values({
+            storyId: story.id,
+            kind: "concurrency_deferred",
+            actor: "heartbeat",
+            payload: {
+              trigger: "throttle-spec-writer",
+              specWriterInProgress: throttleSpecWriterInProgress,
+              maxConcurrentSpecWriter: throttle.maxConcurrentSpecWriter,
+              reason: `spec-writer throttle limit reached (${throttleSpecWriterInProgress}/${throttle.maxConcurrentSpecWriter})`,
+            },
+          });
+          continue;
+        }
+
+        // ── Throttle: total in-progress cap ────────────────────────
+        // Spec-writer dispatches are exempt — they have their own cap.
+        if (
+          !isSpecWriter &&
+          throttleTotalInProgress >= throttle.maxConcurrentTotal
+        ) {
+          console.log(
+            `[orca/heartbeat] throttle: total dispatched (${throttleTotalInProgress}) >= maxConcurrentTotal (${throttle.maxConcurrentTotal}), stopping pickup`,
+          );
+          break;
+        }
+
+        // ── Throttle: max concurrent QA ────────────────────────────
+        // qa-tester dispatches spike system load — cap how many can run
+        // simultaneously. Story stays in `qa` and waits for the next tick.
+        // This is a sub-cap within total — not additive.
+        if (
+          story.agent === "qa-tester" &&
+          throttleQaInProgress >= throttle.maxConcurrentQa
+        ) {
+          console.log(
+            `[orca/heartbeat] qa-throttle: dispatched qa (${throttleQaInProgress}) >= maxConcurrentQa (${throttle.maxConcurrentQa}), keeping story ${story.id} in qa`,
+          );
+          await db.insert(schema.activityEvents).values({
+            storyId: story.id,
+            kind: "concurrency_deferred",
+            actor: "heartbeat",
+            payload: {
+              trigger: "throttle-qa",
+              qaInProgress: throttleQaInProgress,
+              maxConcurrentQa: throttle.maxConcurrentQa,
+              reason: `QA throttle limit reached (${throttleQaInProgress}/${throttle.maxConcurrentQa}) — staying in qa`,
+            },
+          });
+          continue;
+        }
+
+        // ── Throttle: per-project in-progress cap ──────────────────
+        // Spec-writer dispatches are exempt — they have their own global cap.
+        const projectInProgress = throttleByProject.get(story.projectId) ?? 0;
+        if (
+          !isSpecWriter &&
+          projectInProgress >= throttle.maxConcurrentPerProject
+        ) {
+          console.log(
+            `[orca/heartbeat] throttle: project ${story.projectId} implementing (${projectInProgress}) >= maxConcurrentPerProject (${throttle.maxConcurrentPerProject}), skipping story ${story.id}`,
+          );
+          await db.insert(schema.activityEvents).values({
+            storyId: story.id,
+            kind: "concurrency_deferred",
+            actor: "heartbeat",
+            payload: {
+              trigger: "throttle-per-project",
+              projectInProgress,
+              maxConcurrentPerProject: throttle.maxConcurrentPerProject,
+              reason: `per-project throttle limit reached (${projectInProgress}/${throttle.maxConcurrentPerProject})`,
+            },
+          });
+          continue;
+        }
 
         const [project] = await db
           .select()
@@ -404,27 +656,19 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
           `[orca/heartbeat] picking up ${story.status} story ${story.id} (agent: ${story.agent}, slot ${dispatched + 1}/${slots})`,
         );
 
-        const previousPickupStatus = story.status;
-
+        // Heartbeat does NOT change status. The agent owns its own status
+        // transitions: spec-writer sets `planning`, frontend/backend set
+        // `implementing`, qa-tester stays in `qa`, etc. All heartbeat does
+        // here is bump dispatchedAt (purely informational) and spawn.
         await db
           .update(schema.stories)
           .set({
-            status: "in_progress" as StoryStatus,
             dispatchedAt: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(schema.stories.id, story.id));
 
         const pickupModel = await resolveModelForStory(db, story.id);
-
-        if (previousPickupStatus !== "in_progress") {
-          await db.insert(schema.activityEvents).values({
-            storyId: story.id,
-            kind: "state_transition",
-            actor: "heartbeat",
-            payload: { status: "in_progress", from: previousPickupStatus, reason: "heartbeat_pickup" },
-          });
-        }
 
         await db.insert(schema.activityEvents).values({
           storyId: story.id,
@@ -448,14 +692,35 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
           repoPath: project.repoPath,
           title: story.title,
           specMd: story.specMd,
+          trigger: "heartbeat-pickup",
         }).catch((err) =>
           handleDispatchRejection(db, story.id, err, {
             context: "pickup dispatch failed",
-            revertStatus: true,
+            // Status was never optimistically transitioned, so nothing to
+            // revert. The agent owns status; if it never gets to PATCH
+            // because the dispatch died, the row stays in its prior status
+            // and gets re-picked next tick.
+            revertStatus: false,
             actor: "heartbeat",
           }),
         );
 
+        // Update local throttle counters to reflect this new dispatch.
+        // Spec-writer pickups don't count against the implementing
+        // pipeline throttles — they have their own cap.
+        if (!isSpecWriter) {
+          throttleTotalInProgress++;
+          throttleByProject.set(
+            story.projectId,
+            (throttleByProject.get(story.projectId) ?? 0) + 1,
+          );
+        }
+        if (story.agent === "qa-tester") {
+          throttleQaInProgress++;
+        }
+        if (isSpecWriter) {
+          throttleSpecWriterInProgress++;
+        }
         dispatched++;
       }
     }
@@ -467,7 +732,7 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
  */
 export function startHeartbeat(
   db: OrcaDb,
-  intervalMs = 5 * 60 * 1000,
+  intervalMs = 60 * 1000,
 ): () => void {
   console.log(
     `[orca/heartbeat] starting heartbeat loop (interval: ${intervalMs}ms)`,

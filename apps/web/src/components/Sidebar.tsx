@@ -32,6 +32,7 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
       { to: "/projects/add", label: "Add Project" },
       { to: "/agents", label: "Agents" },
       { to: "/recipes", label: "Recipes" },
+      { to: "/settings", label: "Settings", end: true },
     ],
   },
 ];
@@ -63,23 +64,27 @@ export function Sidebar() {
     stories: storiesData?.stories.length ?? 0,
   };
 
-  // Per-project in_progress / in_review counts for sidebar badges
+  // Per-project status counts for sidebar badges.
   const { data: storyCounts } = useQuery({
     queryKey: ["story-counts"],
     queryFn: () => api.stories.counts(),
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
   });
   const projectBadges = new Map<
     string,
-    { inProgress: number; inReview: number }
+    { planning: number; implementing: number; qa: number; review: number }
   >();
   for (const row of storyCounts?.counts ?? []) {
     const entry = projectBadges.get(row.projectId) ?? {
-      inProgress: 0,
-      inReview: 0,
+      planning: 0,
+      implementing: 0,
+      qa: 0,
+      review: 0,
     };
-    if (row.status === "in_progress") entry.inProgress = row.count;
-    if (row.status === "in_qa" || row.status === "final_review") entry.inReview += row.count;
+    if (row.status === "planning") entry.planning += row.count;
+    if (row.status === "implementing") entry.implementing = row.count;
+    if (row.status === "qa") entry.qa += row.count;
+    if (row.status === "review") entry.review += row.count;
     projectBadges.set(row.projectId, entry);
   }
 
@@ -145,14 +150,24 @@ export function Sidebar() {
                     />
                     <span className="flex-1 truncate">{p.name}</span>
                     <span className="ml-auto flex items-center gap-1">
-                      {badges?.inProgress ? (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-yellow-400 text-yellow-900">
-                          {badges.inProgress}
+                      {badges?.planning ? (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-violet-400 text-violet-900" title="planning">
+                          {badges.planning}
                         </span>
                       ) : null}
-                      {badges?.inReview ? (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-blue-200 text-blue-800">
-                          {badges.inReview}
+                      {badges?.implementing ? (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-yellow-400 text-yellow-900" title="implementing">
+                          {badges.implementing}
+                        </span>
+                      ) : null}
+                      {badges?.qa ? (
+                        <span className="inline-flex items-center justify-center min-w-[22px] h-[18px] px-1.5 text-[10px] font-medium rounded bg-orange-400 text-orange-900" title="qa">
+                          {badges.qa}
+                        </span>
+                      ) : null}
+                      {badges?.review ? (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-medium rounded bg-blue-200 text-blue-800" title="review">
+                          {badges.review}
                         </span>
                       ) : null}
                     </span>

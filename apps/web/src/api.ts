@@ -4,6 +4,7 @@
 import type {
   Agent,
   AuditRow,
+  AvailableModel,
   Classification,
   Finding,
   FindingStatus,
@@ -29,6 +30,7 @@ export interface ActivityEvent {
   actor: string;
   payload: Record<string, unknown>;
   createdAt: string;
+  dispatchInstanceId?: string | null;
 }
 
 async function request<T>(
@@ -126,8 +128,9 @@ export const api = {
       projectId: string;
       title: string;
       specMd?: string;
-      status?: "icebox" | "backlog";
+      status?: "icebox" | "planning" | "backlog";
       agent?: string;
+      parentStoryId?: string | null;
       labels?: string[];
       priority?: number;
     }) =>
@@ -246,6 +249,38 @@ export const api = {
       }),
   },
 
+  // --- settings ---
+  settings: {
+    get: () =>
+      request<{
+        throttle: {
+          maxConcurrentPerProject: number;
+          maxConcurrentTotal: number;
+          maxConcurrentQa: number;
+          maxConcurrentSpecWriter: number;
+        };
+      }>("/settings"),
+    patch: (body: {
+      throttle?: {
+        maxConcurrentPerProject?: number;
+        maxConcurrentTotal?: number;
+        maxConcurrentQa?: number;
+        maxConcurrentSpecWriter?: number;
+      };
+    }) =>
+      request<{
+        throttle: {
+          maxConcurrentPerProject: number;
+          maxConcurrentTotal: number;
+          maxConcurrentQa: number;
+          maxConcurrentSpecWriter: number;
+        };
+      }>("/settings", {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+  },
+
   // --- usage ---
   usage: {
     get: () =>
@@ -283,6 +318,19 @@ export const api = {
       ),
     listInvocations: (name: string, limit = 50) =>
       request<{ invocations: AgentInvocation[] }>(`/agents/${name}/invocations?limit=${limit}`),
+  },
+
+  // --- models ---
+  models: {
+    list: () =>
+      request<{
+        models: AvailableModel[];
+        status: {
+          count: number;
+          lastFetchedAt: string | null;
+          lastError: string | null;
+        };
+      }>("/models"),
   },
 };
 

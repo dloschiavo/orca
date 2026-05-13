@@ -7,6 +7,7 @@
 // arrives, either the thinking is done or the story is skipped for one where it is.
 
 export type RefinementQuestionSource =
+  | "spec-writer"
   | "scrum-master"
   | "classifier"
   | "reviewer"
@@ -29,7 +30,7 @@ export interface RefinementQuestionPriorityFactors {
 export interface RefinementQuestion {
   id: string;
   storyId: string;
-  acceptanceCardId: string; // the card version this question was raised against
+  acceptanceCardId: string | null; // the card version this question was raised against; null for spec-writer-sourced rows
   stepId: string | null; // optional: which step the uncertainty is on
   source: RefinementQuestionSource;
   question: string; // "Should the new button replace the old one or sit alongside it?"

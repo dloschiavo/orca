@@ -18,12 +18,18 @@ export default {
         accent: "#5e6ad2",
         // state machine dots
         icebox: "#94a3b8",
+        planning: "#a78bfa",
         backlog: "#ffffff",
+        implementing: "#eab308",
+        qa: "#f97316",
+        review: "#06b6d4",
+        blocked: "#ef4444",
+        done: "#22c55e",
+        // legacy aliases — kept so historical activity-log rows referencing
+        // the old class names don't render dot-less.
         "in-progress": "#eab308",
         "in-qa": "#f97316",
         "final-review": "#06b6d4",
-        blocked: "#ef4444",
-        done: "#22c55e",
         // certainty heatbar
         "cert-high": "#22c55e",
         "cert-medium": "#eab308",

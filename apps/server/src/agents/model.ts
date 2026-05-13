@@ -2,16 +2,45 @@ import { desc, eq } from "drizzle-orm";
 import { schema } from "@orca/db";
 import type { OrcaDb } from "@orca/db";
 import type { AgentName } from "@orca/shared";
+import {
+  familyOf,
+  getAvailableModels,
+} from "../services/available-models.js";
 
-// Current available models, injected into prompts as {models.list} so
-// prompt text never hard-codes version strings. Update this constant when
-// Anthropic ships new models — no prompt edits required.
-export const AVAILABLE_MODELS_LIST = `\
-- claude-haiku-4-5   — fastest and cheapest; use for simple, mechanical tasks (single-file edits, renaming, config tweaks)
-- claude-sonnet-4-6  — balanced speed and capability; use for most tasks (new features, multi-file refactors, standard bugs)
-- claude-opus-4-6    — most capable; use for complex, high-stakes work (architectural changes, tricky concurrency, cross-cutting refactors)
+// Renders the `{models.list}` placeholder injected into prompts. Reads
+// the in-memory cache populated by the refresh loop in
+// `services/available-models.ts`, so prompts always describe the lineup
+// Anthropic currently exposes — no manual edits required when a new
+// model ships.
+//
+// Family descriptions are derived rather than fetched, because the
+// `/v1/models` endpoint only returns ids and display names. The id
+// pattern `claude-<family>-<version>` is stable enough to key off.
+const FAMILY_DESCRIPTION: Record<
+  "opus" | "sonnet" | "haiku" | "unknown",
+  string
+> = {
+  opus: "most capable; use for complex, high-stakes work (architectural changes, tricky concurrency, cross-cutting refactors)",
+  sonnet:
+    "balanced speed and capability; use for most tasks (new features, multi-file refactors, standard bugs)",
+  haiku:
+    "fastest and cheapest; use for simple, mechanical tasks (single-file edits, renaming, config tweaks)",
+  unknown: "",
+};
 
-Set modelOverride on the story via PATCH /api/stories/:id with { "modelOverride": "<model-id>" }.`;
+export function getAvailableModelsList(): string {
+  const models = getAvailableModels();
+  const maxIdLen = Math.max(...models.map((m) => m.id.length));
+  return [
+    ...models.map((m) => {
+      const desc = FAMILY_DESCRIPTION[familyOf(m.id)];
+      const left = `- ${m.id.padEnd(maxIdLen)}`;
+      return desc ? `${left} — ${desc}` : left;
+    }),
+    "",
+    `Set modelOverride on the story via PATCH /api/stories/:id with { "modelOverride": "<model-id>" }.`,
+  ].join("\n");
+}
 
 // Model resolution for spawned agents.
 //

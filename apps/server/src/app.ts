@@ -6,11 +6,18 @@ import { projectsRoutes } from "./routes/projects.js";
 import { storiesRoutes } from "./routes/stories.js";
 import { auditRoutes } from "./routes/audit.js";
 import { agentsRoutes } from "./routes/agents.js";
+import { settingsRoutes } from "./routes/settings.js";
+import { refinementQuestionsRoutes } from "./routes/refinement-questions.js";
+import { storyEventsRoutes } from "./routes/story-events.js";
 import {
   getUsageFraction,
   loadUsageFractionFromDb,
   backfillUsageFractionFromActivity,
 } from "./services/concurrency.js";
+import {
+  getAvailableModels,
+  getAvailableModelsStatus,
+} from "./services/available-models.js";
 
 export interface AppDeps {
   db: OrcaDb;
@@ -70,10 +77,21 @@ export function createApp(deps: AppDeps): Hono<OrcaEnv> {
     return c.json({ usage: info });
   });
 
+  app.get("/api/models", (c) =>
+    c.json({
+      models: getAvailableModels(),
+      status: getAvailableModelsStatus(),
+    }),
+  );
+
   app.route("/api/projects", projectsRoutes());
+  // Mount /events BEFORE /api/stories to prevent /:id catching "events"
+  app.route("/api/stories/events", storyEventsRoutes());
   app.route("/api/stories", storiesRoutes());
   app.route("/api/audit", auditRoutes());
   app.route("/api/agents", agentsRoutes());
+  app.route("/api/settings", settingsRoutes());
+  app.route("/api/refinement-questions", refinementQuestionsRoutes());
 
   app.onError((err, c) => {
     console.error("[orca] error:", err);

@@ -2,7 +2,7 @@ import { useState } from "react";
 
 interface NewStoryModalProps {
   onClose: () => void;
-  onSubmit: (body: { title: string; specMd: string; status: "icebox" | "backlog"; agent: string }) => void;
+  onSubmit: (body: { title: string; specMd: string; status: "icebox" | "planning" | "backlog"; agent: string }) => void;
   submitting: boolean;
   agents: { name: string }[];
 }
@@ -10,8 +10,8 @@ interface NewStoryModalProps {
 export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStoryModalProps) {
   const [title, setTitle] = useState("");
   const [specMd, setSpecMd] = useState("");
-  const [status, setStatus] = useState<"icebox" | "backlog">("backlog");
-  const [agent, setAgent] = useState("triage");
+  const [status, setStatus] = useState<"icebox" | "planning" | "backlog">("icebox");
+  const [agent, setAgent] = useState("spec-writer");
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-start justify-center pt-24 z-50">
@@ -39,10 +39,11 @@ export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStor
               <select
                 className="input text-sm w-auto"
                 value={status}
-                onChange={(e) => setStatus(e.target.value as "icebox" | "backlog")}
+                onChange={(e) => setStatus(e.target.value as "icebox" | "planning" | "backlog")}
               >
-                <option value="backlog">Backlog</option>
                 <option value="icebox">Icebox</option>
+                <option value="planning">Planning</option>
+                <option value="backlog">Backlog</option>
               </select>
             </div>
             <div className="flex items-center gap-2">
@@ -54,7 +55,7 @@ export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStor
               >
                 {agents.length > 0
                   ? agents.map((a) => <option key={a.name} value={a.name}>{a.name}</option>)
-                  : <option value="triage">triage</option>
+                  : <option value="spec-writer">spec-writer</option>
                 }
               </select>
             </div>

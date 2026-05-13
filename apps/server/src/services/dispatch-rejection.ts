@@ -9,7 +9,7 @@ const MAX_FAIL_COUNT = 3;
  * Handle a synchronous-or-promise rejection from a fire-and-forget
  * `runClaudeDispatch` call. Without this, a dispatch that throws between
  * `dispatch_started` and `agent_spawned` (e.g. the cache-stability prompt
- * guard) leaves the story stuck `in_progress` with no PID, no
+ * guard) leaves the story stuck `implementing` with no PID, no
  * `dispatch_failed` event, and invisible in the UI.
  *
  * Logs `dispatch_failed`, bumps `dispatchFailCount`, and either rolls the
@@ -84,6 +84,6 @@ export async function handleDispatchRejection(
     storyId,
     kind: "state_transition",
     actor,
-    payload: { status: "backlog", from: "in_progress", reason: "dispatch_failed_revert" },
+    payload: { status: "backlog", from: "implementing", reason: "dispatch_failed_revert" },
   });
 }

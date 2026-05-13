@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, stat, mkdir, open as fsOpen, readFile, utimes, rm } from "node:fs/promises";
 import { openSync, closeSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { and, desc, eq, isNotNull, max, sql } from "drizzle-orm";
@@ -18,6 +18,7 @@ import { enforceStoryTokenBudget } from "../services/token-budget.js";
 import { isConcurrencyExceeded, countClaudeProcesses, getConcurrencyCap, recordRateLimit, isRateLimited, getRateLimitInfo, recordUsageFraction, persistUsageFraction, extractUsageFraction } from "../services/concurrency.js";
 import { extractModelFromStreamResult, extractModelFromCliWrapper } from "../services/token-usage.js";
 import { handleDispatchRejection } from "../services/dispatch-rejection.js";
+import { storyEvents } from "../services/story-events.js";
 
 // Track running agent processes so we can interrupt them when a story is edited
 // mid-dispatch. Key = storyId.
@@ -26,7 +27,16 @@ import { handleDispatchRejection } from "../services/dispatch-rejection.js";
 // and spawn a second concurrent tail loop on the same log file.
 const _g = globalThis as typeof globalThis & {
   _orcaRunningDispatches?: Map<string, ChildProcess>;
-  _orcaActiveLifecycles?: Set<string>;
+  // Ref-counted: maps storyId → number of live runClaudeDispatch invocations
+  // currently managing this story in this Node process. Heartbeat skips any
+  // story with a non-zero count. Ref-count semantics (vs. a Set) mean every
+  // drop / completion / throw decrements exactly once, so a story can never
+  // remain "active" after all its callers have returned. The earlier Set
+  // design relied on a conservative "don't unwind on drop" rule that left
+  // phantom entries whenever the supposed winning instance wasn't actually
+  // in this Node process (cross-Node ghost from a crashed parent) — heartbeat
+  // then silently filtered the story forever.
+  _orcaActiveLifecycles?: Map<string, number>;
   // Deduplication guard: tracks `${storyId}:${uuid}` keys for agent_stream
   // events that have already been written to the DB this process lifetime.
   // Shared across all concurrent tail loops (including duplicate loops that
@@ -35,7 +45,11 @@ const _g = globalThis as typeof globalThis & {
   _orcaStreamedUuids?: Set<string>;
 };
 if (!_g._orcaRunningDispatches) _g._orcaRunningDispatches = new Map<string, ChildProcess>();
-if (!_g._orcaActiveLifecycles)  _g._orcaActiveLifecycles  = new Set<string>();
+if (!(_g._orcaActiveLifecycles instanceof Map)) {
+  // Re-init if a prior version of this module stored a Set on the global —
+  // vite-node hot reloads preserve the global, so the shape can drift.
+  _g._orcaActiveLifecycles = new Map<string, number>();
+}
 if (!_g._orcaStreamedUuids)     _g._orcaStreamedUuids     = new Set<string>();
 const runningDispatches = _g._orcaRunningDispatches;
 
@@ -114,12 +128,25 @@ function killStoryProcesses(storyId: string, dbPid: number | null): void {
 // Persisted on globalThis (see runningDispatches above) for the same reason.
 const activeLifecycles = _g._orcaActiveLifecycles!;
 
+function acquireLifecycle(storyId: string): void {
+  activeLifecycles.set(storyId, (activeLifecycles.get(storyId) ?? 0) + 1);
+}
+
+function releaseLifecycle(storyId: string): void {
+  const n = (activeLifecycles.get(storyId) ?? 0) - 1;
+  if (n <= 0) activeLifecycles.delete(storyId);
+  else activeLifecycles.set(storyId, n);
+}
+
 /**
- * True iff there is a live `runClaudeDispatch` lifecycle actively managing
- * this story in this Node process. Heartbeat recovery must skip these.
+ * True iff there is at least one live `runClaudeDispatch` invocation actively
+ * managing this story in this Node process. Heartbeat recovery must skip
+ * these. Backed by a ref-count so every acquire/release pairs cleanly even
+ * when multiple invocations overlap (e.g. heartbeat pickup + manual dispatch
+ * racing on the same story).
  */
 export function isDispatchLifecycleActive(storyId: string): boolean {
-  return activeLifecycles.has(storyId);
+  return (activeLifecycles.get(storyId) ?? 0) > 0;
 }
 
 // QA cap: how many QA failures we tolerate before marking the story
@@ -128,8 +155,9 @@ const createStorySchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().min(1),
   specMd: z.string().default(""),
-  status: z.enum(["icebox", "backlog"]).default("backlog"),
+  status: z.enum(["icebox", "planning", "backlog"]).default("backlog"),
   agent: z.string().optional(),
+  parentStoryId: z.string().uuid().nullable().optional(),
   labels: z.array(z.string()).optional(),
   priority: z.number().int().optional(),
 });
@@ -140,10 +168,11 @@ const updateStorySchema = z.object({
   status: z
     .enum([
       "icebox",
+      "planning",
       "backlog",
-      "in_progress",
-      "in_qa",
-      "final_review",
+      "implementing",
+      "qa",
+      "review",
       "blocked",
       "done",
       "canceled",
@@ -153,6 +182,7 @@ const updateStorySchema = z.object({
   labels: z.array(z.string()).optional(),
   priority: z.number().int().optional(),
   blockedReason: z.string().nullable().optional(),
+  dispatchFailCount: z.number().int().min(0).optional(),
   /** Who is making this update. Defaults to "user". Agents should pass their agent name. */
   actor: z.string().optional(),
 });
@@ -175,9 +205,9 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(schema.stories.updatedAt));
 
-    // For in-progress stories, fetch last activity timestamps in one query.
+    // For implementing stories, fetch last activity timestamps in one query.
     const inProgressIds = rows
-      .filter((r) => r.status === "in_progress")
+      .filter((r) => r.status === "implementing")
       .map((r) => r.id);
 
     let lastActivityMap: Record<string, string> = {};
@@ -203,9 +233,31 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       }
     }
 
+    // Flag stories that have an open blocking refinement question — the
+    // UI pulses the status dot for these so the user notices a story
+    // waiting on them, similar to how implementing/qa stories pulse.
+    const storyIds = rows.map((r) => r.id);
+    const blockerRows = storyIds.length
+      ? await db
+          .selectDistinct({ storyId: schema.refinementQuestions.storyId })
+          .from(schema.refinementQuestions)
+          .where(
+            and(
+              sql`${schema.refinementQuestions.storyId} IN (${sql.join(
+                storyIds.map((id) => sql`${id}`),
+                sql`, `,
+              )})`,
+              eq(schema.refinementQuestions.status, "open"),
+              eq(schema.refinementQuestions.blocksDispatch, true),
+            ),
+          )
+      : [];
+    const hasBlocker = new Set(blockerRows.map((r) => r.storyId));
+
     const stories = rows.map((r) => ({
       ...r,
       lastActivityAt: lastActivityMap[r.id] ?? null,
+      hasOpenBlockingQuestion: hasBlocker.has(r.id),
     }));
 
     return c.json({ stories });
@@ -222,7 +274,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       })
       .from(schema.stories)
       .where(
-        sql`${schema.stories.status} IN ('in_progress', 'in_qa', 'final_review')`,
+        sql`${schema.stories.status} IN ('implementing', 'qa', 'review', 'planning')`,
       )
       .groupBy(schema.stories.projectId, schema.stories.status);
     return c.json({ counts: rows });
@@ -239,7 +291,10 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         title: body.title,
         specMd: body.specMd,
         status: body.status,
-        agent: body.agent ?? "triage",
+        agent: body.agent ?? "spec-writer",
+        ...(body.parentStoryId !== undefined
+          ? { parentStoryId: body.parentStoryId }
+          : {}),
         labels: body.labels ?? [],
         priority: body.priority ?? 0,
         // Stamp firstBacklogAt when the story is created in backlog status.
@@ -255,7 +310,13 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       payload: { title: story.title },
     });
 
-    return c.json({ story }, 201);
+    const createdJson = c.json({ story }, 201);
+    try {
+      storyEvents.emit("story.changed", { storyId: story.id, projectId: story.projectId, type: "created" });
+    } catch (e) {
+      console.error("[orca] story-events emit error:", e);
+    }
+    return createdJson;
   });
 
   app.get("/:id", async (c) => {
@@ -275,16 +336,15 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       .orderBy(desc(schema.acceptanceCards.version))
       .limit(1);
 
-    // Fetch open refinement questions.
+    // Fetch ALL refinement questions for this story (open + answered +
+    // obsolete). The story page renders open ones as primary input
+    // textareas and shows answered/obsolete ones collapsed below, so the
+    // user can see what they answered after the on-answer hook clears
+    // the question out of the open list.
     const questions = await db
       .select()
       .from(schema.refinementQuestions)
-      .where(
-        and(
-          eq(schema.refinementQuestions.storyId, id),
-          eq(schema.refinementQuestions.status, "open"),
-        ),
-      )
+      .where(eq(schema.refinementQuestions.storyId, id))
       .orderBy(desc(schema.refinementQuestions.priority));
 
     // Working memory (may not exist yet).
@@ -449,6 +509,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       ...(parsed.labels !== undefined ? { labels: parsed.labels } : {}),
       ...(parsed.priority !== undefined ? { priority: parsed.priority } : {}),
       ...(parsed.blockedReason !== undefined ? { blockedReason: parsed.blockedReason } : {}),
+      ...(parsed.dispatchFailCount !== undefined ? { dispatchFailCount: parsed.dispatchFailCount } : {}),
     };
 
     // Read current story before updating so we can detect what changed.
@@ -458,6 +519,70 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       .where(eq(schema.stories.id, id));
     if (!current) return c.json({ error: "story not found" }, 404);
 
+    // ── QA Checklist Gate ────────────────────────────────────────────────
+    // Recipes are 100% binding: every requirement must be enumerated in a
+    // checklist comment before an agent transitions a story to qa.
+    // Without this gate, agents skip past long sections of recipes (the
+    // canonical failure mode is "implemented data model + editor, missed
+    // public routing 8 sections later") and qa-tester reviews a partial
+    // implementation as if it were complete.
+    //
+    // Rule: when an AGENT (not "user") PATCHes status to qa from
+    // implementing, the most recent comment on the story must begin with
+    // the literal token "QA checklist:". If not, reject with 400 — the
+    // agent must produce the checklist or it cannot hand off.
+    if (
+      body.status === "qa" &&
+      current.status === "implementing" &&
+      eventActor !== "user"
+    ) {
+      const [latestComment] = await db
+        .select({ payload: schema.activityEvents.payload })
+        .from(schema.activityEvents)
+        .where(
+          and(
+            eq(schema.activityEvents.storyId, id),
+            eq(schema.activityEvents.kind, "comment"),
+          ),
+        )
+        .orderBy(desc(schema.activityEvents.createdAt))
+        .limit(1);
+      const commentBody =
+        (latestComment?.payload as { body?: string } | null)?.body ?? "";
+      if (!/^\s*QA checklist:/i.test(commentBody)) {
+        return c.json(
+          {
+            error: "checklist_required",
+            message:
+              "Cannot transition status: qa without first posting a comment that begins with 'QA checklist:' enumerating every atomic requirement in the recipe with file:line evidence (per recipes/_index.md rule 7 and 100%-binding-recipes contract). POST the comment, then PATCH status: qa again.",
+          },
+          400,
+        );
+      }
+    }
+
+    // ── Review-only-from-qa gate ─────────────────────────────────────────
+    // `review` is the human-approval gate at the end of the pipeline. It
+    // must be reachable ONLY from `qa` (qa-tester signing off). Without
+    // this gate, an implementing agent (frontend/backend) can shortcut
+    // around qa-tester by PATCHing review directly — which is what
+    // happened on bf1cc5d0. Users can still set review manually (e.g.
+    // the user knows a story doesn't need QA), so we only enforce for
+    // agent-initiated PATCHes.
+    if (
+      body.status === "review" &&
+      current.status !== "qa" &&
+      eventActor !== "user"
+    ) {
+      return c.json(
+        {
+          error: "review_requires_qa",
+          message: `Cannot transition status: review from ${current.status}. The review status is reserved for qa-tester sign-off — implementing agents must hand off to qa-tester (PATCH agent="qa-tester", status="qa") instead. If you genuinely believe this story needs no QA, leave it to the human reviewer.`,
+        },
+        400,
+      );
+    }
+
     // Stamp firstBacklogAt the first time a story transitions to "backlog"
     // (covers icebox → backlog moves). Only set once — never overwrite an
     // existing value so re-queuing a story doesn't reset the clock.
@@ -466,9 +591,21 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         ? { firstBacklogAt: new Date() }
         : {};
 
+    // Manually unblocking a story (status moving out of `blocked`) should
+    // wipe accumulated strike state — otherwise a stale dispatchFailCount
+    // re-blocks the row on the very next stale tick. Always clear
+    // blockedReason on the way out, even if the caller didn't explicitly
+    // null it.
+    const unblockUpdate =
+      current.status === "blocked" &&
+      body.status !== undefined &&
+      body.status !== "blocked"
+        ? { dispatchFailCount: 0, blockedReason: null }
+        : {};
+
     const [updated] = await db
       .update(schema.stories)
-      .set({ ...body, ...firstBacklogAtUpdate, updatedAt: new Date() })
+      .set({ ...body, ...firstBacklogAtUpdate, ...unblockUpdate, updatedAt: new Date() })
       .where(eq(schema.stories.id, id))
       .returning();
     if (!updated) return c.json({ error: "story not found" }, 404);
@@ -480,13 +617,6 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         actor: eventActor,
         payload: { status: body.status },
       });
-
-      // If the story is being canceled (or manually blocked), kill all running
-      // agent processes immediately.  Without this the agent runs to completion
-      // even though the story has been abandoned.
-      if (body.status === "canceled" || body.status === "blocked") {
-        killStoryProcesses(id, current.dispatchPid);
-      }
     }
 
     // If the agent was reassigned, log an agent_transition.
@@ -499,6 +629,62 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         actor: eventActor,
         payload: { from: current.agent, to: body.agent },
       });
+    }
+
+    // Kill the running agent process on any PATCH that signals the
+    // current agent's work is done. Distinct from "starting" transitions:
+    //
+    //   FINISHING transitions (kill the current process — it's done):
+    //     → backlog    (spec-writer or qa-tester handing off)
+    //     → qa         (implementing agent handing off to qa-tester)
+    //     → review     (qa-tester handing off to human)
+    //     → blocked / done / canceled (terminal)
+    //     agent changed (handoff to a different agent)
+    //
+    //   STARTING transitions (do NOT kill — agent just claimed the story):
+    //     → implementing (frontend/backend "First action" claim PATCH)
+    //     → planning    (spec-writer claim PATCH out of icebox; also used
+    //                    to park for user answers — relies on agent
+    //                    exiting cleanly on its own in the park case)
+    //
+    // Without this, the SDK keeps the agent's child alive after logical
+    // completion — draining `task_notification` events from background
+    // Task subagents (puppeteer / Chrome MCP) and burning tokens on
+    // --resume turns that just acknowledge notifications against a
+    // session whose work is conceptually done.
+    const finishingStatuses = new Set([
+      "backlog",
+      "qa",
+      "review",
+      "blocked",
+      "done",
+      "canceled",
+    ]);
+    const isFinishingStatus =
+      body.status !== undefined && finishingStatuses.has(body.status);
+    // Only kill the running process when a HUMAN transitions the story.
+    // When the running agent itself PATCHes to a finishing status, it is
+    // winding down voluntarily — killing it at this point races the SIGTERM
+    // against the CLI writing its result event (cost + tokens), causing
+    // totalCostUsd / totalTokensUsed to be null for all recent dispatches.
+    // Agent-initiated PATCHes arrive with eventActor set to the agent name
+    // (not "user"), so we suppress the kill and let the process exit cleanly.
+    const shouldKill =
+      current.dispatchPid != null && eventActor === "user" && (isFinishingStatus || agentChanged);
+    if (shouldKill) {
+      killStoryProcesses(id, current.dispatchPid);
+      // Clear the dispatch tracking columns so heartbeat doesn't keep
+      // trying to adopt a process we just killed. The dispatch runner's
+      // own cleanup will do this on normal exit, but a forced kill
+      // bypasses that path on some platforms.
+      await db
+        .update(schema.stories)
+        .set({
+          dispatchPid: null,
+          dispatchState: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.stories.id, id));
     }
 
     // If spec or title changed, log a story_edited event.
@@ -524,7 +710,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     }
 
 
-    // If the story is in_progress and its spec/title changed by a *human*,
+    // If the story is implementing and its spec/title changed by a *human*,
     // interrupt the running agent and re-dispatch with an explanation of what
     // changed.  Agent-initiated edits (e.g. spec-writer updating its own spec)
     // must not kill the agent — the agent is doing exactly what it's supposed
@@ -532,7 +718,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     // set it to their own name (e.g. "spec-writer"), humans omit it (defaults
     // to "user").
     if (
-      current.status === "in_progress" &&
+      current.status === "implementing" &&
       (specChanged || titleChanged) &&
       eventActor === "user"
     ) {
@@ -586,14 +772,20 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       }
     }
 
-    return c.json({ story: updated });
+    const patchedJson = c.json({ story: updated });
+    try {
+      storyEvents.emit("story.changed", { storyId: id, projectId: updated.projectId, type: "updated" });
+    } catch (e) {
+      console.error("[orca] story-events emit error:", e);
+    }
+    return patchedJson;
   });
 
   // POST /api/stories/:id/stop
   //
   // Hard-stop a running dispatch. Only meaningful for stories that are
-  // actually running — i.e. status is `in_progress` or `in_qa`. Every other
-  // status (icebox, backlog, done, final_review, blocked, canceled) is
+  // actually running — i.e. status is `implementing` or `qa`. Every other
+  // status (icebox, planning, backlog, done, review, blocked, canceled) is
   // definitionally already stopped, so /stop is a no-op for those.
   app.post("/:id/stop", async (c) => {
     const id = c.req.param("id");
@@ -605,7 +797,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       .where(eq(schema.stories.id, id));
     if (!story) return c.json({ error: "story not found" }, 404);
 
-    if (story.status !== "in_progress" && story.status !== "in_qa") {
+    if (story.status !== "implementing" && story.status !== "qa") {
       return c.json({ ok: true, noop: true, status: story.status });
     }
 
@@ -631,14 +823,12 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       payload: { reason: "manual_stop" },
     });
 
-    if (previousStatus !== "blocked") {
-      await db.insert(schema.activityEvents).values({
-        storyId: id,
-        kind: "state_transition",
-        actor: "user",
-        payload: { status: "blocked", from: previousStatus, reason: "manual_stop" },
-      });
-    }
+    await db.insert(schema.activityEvents).values({
+      storyId: id,
+      kind: "state_transition",
+      actor: "user",
+      payload: { status: "blocked", from: previousStatus, reason: "manual_stop" },
+    });
 
     return c.json({ ok: true });
   });
@@ -667,6 +857,36 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     const interrupt = body.interrupt === true;
     const actor = typeof body.actor === "string" ? body.actor : "user";
 
+    // Reject obvious debris from agents. Agents have posted literal "test"
+    // comments mid-cycle, which then pollute the checklist gate (the most
+    // recent comment is no longer the real QA checklist) and confuse
+    // qa-tester's enumeration. Users posting genuine short notes can be
+    // anything from "lgtm" to "ship it", so only enforce the floor on
+    // non-user actors. The list is restrictive on purpose — anything an
+    // agent legitimately wants to say is more than 24 chars and not one of
+    // these tokens.
+    if (actor !== "user") {
+      const minAgentCommentLength = 24;
+      const debrisTokens = new Set([
+        "test", "test comment", "testing", "hello", "ping",
+        "ok", "okay", "done", "wip", "x", "y", "z",
+      ]);
+      const lowered = commentBody.toLowerCase();
+      if (
+        commentBody.length < minAgentCommentLength ||
+        debrisTokens.has(lowered)
+      ) {
+        return c.json(
+          {
+            error: "debris_comment_rejected",
+            message:
+              `Agent comments must be substantive (≥${minAgentCommentLength} chars, not a test/debug token). Got actor=${actor}, body=${JSON.stringify(commentBody)}. Likely cause: a test/debug call leaked into the dispatch. Either post the real comment, or skip the POST entirely.`,
+          },
+          400,
+        );
+      }
+    }
+
     // Store the comment as an activity event
     await db.insert(schema.activityEvents).values({
       storyId: id,
@@ -681,7 +901,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         .from(schema.stories)
         .where(eq(schema.stories.id, id));
 
-      if (story && story.status === "in_progress") {
+      if (story && story.status === "implementing") {
         killStoryProcesses(id, story.dispatchPid);
         await db
           .update(schema.stories)
@@ -702,7 +922,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
           storyId: id,
           kind: "state_transition",
           actor: "user",
-          payload: { status: "backlog", from: "in_progress", reason: "comment_interrupt" },
+          payload: { status: "backlog", from: "implementing", reason: "comment_interrupt" },
         });
       }
     }
@@ -728,7 +948,13 @@ export function storiesRoutes(): Hono<OrcaEnv> {
 
     await db.delete(schema.stories).where(eq(schema.stories.id, id));
 
-    return c.json({ ok: true });
+    const deletedJson = c.json({ ok: true });
+    try {
+      storyEvents.emit("story.changed", { storyId: id, projectId: story.projectId, type: "deleted" });
+    } catch (e) {
+      console.error("[orca] story-events emit error:", e);
+    }
+    return deletedJson;
   });
 
   // POST /api/stories/:id/dispatch
@@ -736,7 +962,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
   // MVP agent loop. Spawns `claude` with the story spec as a prompt, in the
   // project's repoPath, with permissions bypassed so it can actually write.
   // Streams stdout/stderr into activity_events as it goes, then captures the
-  // resulting git diff and transitions the story to in_qa.
+  // resulting git diff and transitions the story to qa.
   //
   // Fire-and-forget: we kick the child, return 202, and let the UI poll via
   // GET /stories/:id for activity updates. No queue, no scheduler, no worker —
@@ -757,39 +983,31 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       .where(eq(schema.projects.id, story.projectId));
     if (!project) return c.json({ error: "project not found" }, 404);
 
-    if (story.status === "in_progress") {
-      return c.json({ error: "story already in progress" }, 409);
+    // Refuse to dispatch a story that already has an active dispatch
+    // (dispatchPid is the busy mutex — set inside runClaudeDispatch after
+    // the spawn lands). Status is owned by the agent; this route does not
+    // touch it.
+    if (story.dispatchPid != null) {
+      return c.json({ error: "story already dispatched" }, 409);
     }
 
     if (!story.agent) {
       await db
         .update(schema.stories)
-        .set({ agent: "triage", updatedAt: new Date() })
+        .set({ agent: "spec-writer", updatedAt: new Date() })
         .where(eq(schema.stories.id, id));
-      story.agent = "triage";
+      story.agent = "spec-writer";
     }
-
-    const previousStatus = story.status;
 
     await db
       .update(schema.stories)
       .set({
-        status: "in_progress",
         dispatchedAt: new Date(),
         updatedAt: new Date(),
       })
       .where(eq(schema.stories.id, id));
 
     const resolvedModel = await resolveModelForStory(db, id);
-
-    if (previousStatus !== "in_progress") {
-      await db.insert(schema.activityEvents).values({
-        storyId: id,
-        kind: "state_transition",
-        actor: "user",
-        payload: { status: "in_progress", from: previousStatus, reason: "manual_dispatch" },
-      });
-    }
 
     await db.insert(schema.activityEvents).values({
       storyId: id,
@@ -814,7 +1032,9 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     }).catch((err) =>
       handleDispatchRejection(db, id, err, {
         context: "manual dispatch failed",
-        revertStatus: true,
+        // Status was never optimistically transitioned by this route — the
+        // agent owns its own status. Nothing to revert.
+        revertStatus: false,
       }),
     );
 
@@ -858,28 +1078,20 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     if (!story.agent) {
       await db
         .update(schema.stories)
-        .set({ agent: "triage", updatedAt: new Date() })
+        .set({ agent: "spec-writer", updatedAt: new Date() })
         .where(eq(schema.stories.id, id));
-      story.agent = "triage";
+      story.agent = "spec-writer";
     }
 
-    const previousWakeStatus = story.status;
-
+    // Wake does NOT change status. The agent that gets spawned owns its
+    // own status transition. We only bump dispatchedAt as a hint to the
+    // UI that something is about to run.
     await db
       .update(schema.stories)
-      .set({ status: "in_progress", dispatchedAt: new Date(), updatedAt: new Date() })
+      .set({ dispatchedAt: new Date(), updatedAt: new Date() })
       .where(eq(schema.stories.id, id));
 
     const resolvedModel = await resolveModelForStory(db, id);
-
-    if (previousWakeStatus !== "in_progress") {
-      await db.insert(schema.activityEvents).values({
-        storyId: id,
-        kind: "state_transition",
-        actor: "system",
-        payload: { status: "in_progress", from: previousWakeStatus, reason: "wake" },
-      });
-    }
 
     await db.insert(schema.activityEvents).values({
       storyId: id,
@@ -904,7 +1116,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     }).catch((err) =>
       handleDispatchRejection(db, id, err, {
         context: "wake dispatch failed",
-        revertStatus: true,
+        revertStatus: false,
       }),
     );
 
@@ -939,6 +1151,14 @@ export interface DispatchArgs {
   adoptExistingPid?: { pid: number; state: DispatchState };
   /** Source that initiated this dispatch — logged to activity. */
   trigger?: "manual" | "wake" | "edit-redispatch" | "heartbeat-pickup" | "heartbeat-recovery" | "heartbeat-adoption";
+  /** Status the caller transitioned the row from. When the dispatch-claim
+   *  guard drops this dispatch (because a previous dispatch is still
+   *  finishing up), the row is reverted back to this status so heartbeat
+   *  open-story pickup can re-fire cleanly on the next tick. Without this,
+   *  the optimistic implementing transition is left orphaned with no live
+   *  process, and stale-activity detection eventually marks the story
+   *  blocked even though no agent ever actually died. */
+  revertStatusOnDrop?: StoryStatus;
   /** Internal: set when we're recursing after a --resume failure so the
    *  resume-fallback branch can't fire a second time and loop forever. */
   _resumeFallback?: boolean;
@@ -955,16 +1175,197 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
     isRecovery,
     adoptExistingPid,
     trigger,
+    revertStatusOnDrop,
   } = args;
 
+  // Per-lifecycle UUID. Stamped on every activity event this dispatch
+  // emits so the dispatch-claim guard below can identify "another thread"
+  // by comparing dispatch_instance_id across rows.
+  const dispatchInstanceId = randomUUID();
+
   // Mark this story as having an active dispatch lifecycle in the current
-  // Node process BEFORE any await. Heartbeat checks this set and will skip
-  // recovery for any story in it — which is what protects the post-do-er
-  // window (QA gate, retry recursion) from spurious "dead PID" recovery.
-  // This line MUST be synchronous with the caller so the guard is visible
-  // to any heartbeat tick that fires between now and the first await.
-  activeLifecycles.add(storyId);
+  // Node process BEFORE any await. Heartbeat checks the ref-count and will
+  // skip recovery for any story with count > 0 — which is what protects the
+  // post-do-er window (QA gate, retry recursion) from spurious "dead PID"
+  // recovery. This line MUST be synchronous with the caller so the guard is
+  // visible to any heartbeat tick that fires between now and the first await.
+  acquireLifecycle(storyId);
   try {
+
+  // ── Dispatch-claim guard ─────────────────────────────────────────────
+  // Insert our claim into activity_events, then check whether any other
+  // *live* dispatch instance has activity in the last 60s ordered before
+  // ours. "Live" means the instance has not yet logged a terminal event
+  // (dispatch_completed / dispatch_dropped / dispatch_failed) AND its
+  // spawned PID is actually still running. Without the PID liveness
+  // check, instances orphaned by a Node crash continued to look "live"
+  // for the duration of the 60s lookback (no terminal event was ever
+  // written because the parent process died before the finally block).
+  // Adoption attempts on a fresh Node boot would silently drop and
+  // leave a phantom entry in `activeLifecycles`, wedging the story
+  // until the next server restart. Order is deterministic on
+  // (created_at, dispatch_instance_id) so two simultaneous racers always
+  // agree on the winner — exactly one drops.
+  const [claimRow] = await db
+    .insert(schema.activityEvents)
+    .values({
+      storyId,
+      kind: "dispatch_claim",
+      actor: "system",
+      payload: {
+        instanceId: dispatchInstanceId,
+        adopt: Boolean(adoptExistingPid),
+        ...(trigger ? { trigger } : {}),
+      },
+      dispatchInstanceId,
+    })
+    .returning({ createdAt: schema.activityEvents.createdAt });
+  const claimAt = claimRow!.createdAt;
+  const candidatesRaw = await db.execute(sql`
+    SELECT
+      c.dispatch_instance_id AS "instanceId",
+      (
+        SELECT (sp.payload->>'pid')::int
+        FROM activity_events sp
+        WHERE sp.story_id = ${storyId}
+          AND sp.dispatch_instance_id = c.dispatch_instance_id
+          AND sp.kind IN ('agent_spawned', 'agent_adopted')
+        ORDER BY sp.created_at DESC
+        LIMIT 1
+      ) AS "pid",
+      (
+        SELECT MAX(le.created_at)
+        FROM activity_events le
+        WHERE le.story_id = ${storyId}
+          AND le.dispatch_instance_id = c.dispatch_instance_id
+      ) AS "lastEventAt"
+    FROM (
+      SELECT DISTINCT ae.dispatch_instance_id
+      FROM activity_events ae
+      WHERE ae.story_id = ${storyId}
+        AND ae.dispatch_instance_id IS NOT NULL
+        AND ae.dispatch_instance_id <> ${dispatchInstanceId}
+        AND ae.created_at > now() - interval '60 seconds'
+        AND (ae.created_at, ae.dispatch_instance_id) < (${claimAt.toISOString()}::timestamptz, ${dispatchInstanceId})
+        AND NOT EXISTS (
+          SELECT 1 FROM activity_events term
+          WHERE term.story_id = ${storyId}
+            AND term.dispatch_instance_id = ae.dispatch_instance_id
+            AND term.kind IN ('dispatch_completed', 'dispatch_dropped', 'dispatch_failed')
+        )
+    ) c
+  `);
+  const candidates = (
+    Array.isArray(candidatesRaw)
+      ? candidatesRaw
+      : ((candidatesRaw as { rows?: unknown[] }).rows ?? [])
+  ) as { instanceId: string; pid: number | null; lastEventAt: string | Date | null }[];
+
+  // A candidate is a real live competitor iff its spawned PID is still
+  // alive, OR it has no PID yet AND it logged an event very recently
+  // (the in-process racer that hasn't reached the spawn line yet). The
+  // pre-spawn window is small — agent prompt loading, dispatch-state
+  // persist, then spawn — so we treat a no-PID instance with no event in
+  // the last 15s as a ghost from a crashed parent that died between
+  // dispatch_claim and agent_spawned. Real concurrent dispatches will
+  // either have spawned (PID alive) or be visibly active.
+  //
+  // Adoption-mode exclusion: when this dispatch is taking over an
+  // existing detached child (adoptExistingPid set), the previous Node's
+  // instance for that same PID is not a competitor — it's the very
+  // thing we're adopting. Filtering by PID match handles all flavours:
+  // backend that handed off to qa-tester (spawn event still bound to
+  // the same PID until exit), or a still-running do-er whose parent
+  // died. Without this exclusion, every adoption attempt drops itself
+  // and leaves a phantom `activeLifecycles` entry that wedges the story
+  // until the next server restart.
+  const PRE_SPAWN_GHOST_THRESHOLD_MS = 15_000;
+  const adoptedPid = adoptExistingPid?.pid;
+  const liveBlockers: typeof candidates = [];
+  const ghostBlockers: typeof candidates = [];
+  for (const c of candidates) {
+    if (adoptedPid != null && c.pid === adoptedPid) continue;
+    if (c.pid != null) {
+      if (isPidAlive(c.pid)) liveBlockers.push(c);
+      else ghostBlockers.push(c);
+    } else {
+      const last = c.lastEventAt
+        ? new Date(c.lastEventAt as string | Date).getTime()
+        : 0;
+      if (Date.now() - last < PRE_SPAWN_GHOST_THRESHOLD_MS) liveBlockers.push(c);
+      else ghostBlockers.push(c);
+    }
+  }
+
+  // Tombstone the ghosts so the next claim guard doesn't waste another
+  // round trip per ghost — the synthetic dispatch_failed makes them fall
+  // out of the candidate query above via the NOT EXISTS clause.
+  if (ghostBlockers.length > 0) {
+    await db.insert(schema.activityEvents).values(
+      ghostBlockers.map((g) => ({
+        storyId,
+        kind: "dispatch_failed",
+        actor: "system",
+        payload: {
+          reason: "ghost_cleanup",
+          ghostInstanceId: g.instanceId,
+          ghostPid: g.pid,
+          sweptBy: dispatchInstanceId,
+        },
+        dispatchInstanceId: g.instanceId,
+      })),
+    );
+  }
+
+  if (liveBlockers.length > 0) {
+    await db.insert(schema.activityEvents).values({
+      storyId,
+      kind: "dispatch_dropped",
+      actor: "system",
+      payload: {
+        reason: "another_active_dispatch",
+        instanceId: dispatchInstanceId,
+        ...(trigger ? { trigger } : {}),
+        adopt: Boolean(adoptExistingPid),
+      },
+      dispatchInstanceId,
+    });
+    // Revert the caller's optimistic implementing transition so the row is
+    // pickup-able again. Otherwise the wake/pickup path leaves the story
+    // wedged implementing with no live process — heartbeat then counts that
+    // silence as a stale strike and eventually blocks the story.
+    if (revertStatusOnDrop && revertStatusOnDrop !== "implementing") {
+      const [current] = await db
+        .select({ status: schema.stories.status })
+        .from(schema.stories)
+        .where(eq(schema.stories.id, storyId));
+      if (current?.status === "implementing") {
+        await db
+          .update(schema.stories)
+          .set({
+            status: revertStatusOnDrop as StoryStatus,
+            dispatchedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.stories.id, storyId));
+        await db.insert(schema.activityEvents).values({
+          storyId,
+          kind: "state_transition",
+          actor: "system",
+          payload: {
+            status: revertStatusOnDrop,
+            from: "implementing",
+            reason: "dispatch_dropped_revert",
+          },
+          dispatchInstanceId,
+        });
+      }
+    }
+    // The ref-count's `finally` decrement handles this exit path. The
+    // co-racer (if any) has its own acquire/release pair, so its count
+    // survives our release.
+    return;
+  }
 
   const [[storyRow]] = await Promise.all([
     db
@@ -979,7 +1380,7 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
   ]);
   let existingSessionId = storyRow?.claudeSessionId ?? null;
   const storedSystemPromptHash = storyRow?.claudeSessionSystemPromptHash ?? null;
-  const storyAgent = storyRow?.agent ?? "triage";
+  const storyAgent = storyRow?.agent ?? "spec-writer";
   const projectId = storyRow?.projectId ?? "";
 
   // Validate the agent exists in the registry. If not, fail loudly — never
@@ -1044,7 +1445,7 @@ PATCH /api/stories/<id>
 Body (all optional):
   title        string
   specMd       string
-  status       icebox | backlog | in_progress | in_qa | final_review | blocked | done | canceled
+  status       icebox | planning | backlog | implementing | qa | review | blocked | done | canceled
   agent        string | null
   labels       string[]
   priority     integer
@@ -1132,9 +1533,53 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     };
   }
 
+  // Fetch refinement question history once per dispatch so the spec-writer
+  // (and any other agent that asks for it) can see every Q+A inline in its
+  // prompt instead of having to remember to query the API.
+  const getRefinementHistory = once(async () => {
+    const rows = await db
+      .select({
+        id: schema.refinementQuestions.id,
+        question: schema.refinementQuestions.question,
+        answer: schema.refinementQuestions.answer,
+        status: schema.refinementQuestions.status,
+        blocksDispatch: schema.refinementQuestions.blocksDispatch,
+        createdAt: schema.refinementQuestions.createdAt,
+        answeredAt: schema.refinementQuestions.answeredAt,
+      })
+      .from(schema.refinementQuestions)
+      .where(eq(schema.refinementQuestions.storyId, storyId))
+      .orderBy(schema.refinementQuestions.createdAt);
+    return rows;
+  });
+  const renderAnswers = async () => {
+    const rows = await getRefinementHistory();
+    const answered = rows.filter((r) => r.status === "answered" && r.answer);
+    if (answered.length === 0) return "(no answered questions yet)";
+    return answered
+      .map(
+        (r, i) =>
+          `Q${i + 1}: ${r.question}\nA${i + 1}: ${r.answer}`,
+      )
+      .join("\n\n");
+  };
+  const renderOpen = async () => {
+    const rows = await getRefinementHistory();
+    const open = rows.filter((r) => r.status === "open");
+    if (open.length === 0) return "(no open questions)";
+    return open
+      .map(
+        (r, i) =>
+          `Q${i + 1}${r.blocksDispatch ? " (BLOCKING)" : ""}: ${r.question}`,
+      )
+      .join("\n\n");
+  };
+
   const promptResolvers = {
     "story.title":      title,
     "story.spec":       specMd || "(no spec provided)",
+    "story.refinement_answers": renderAnswers,
+    "story.open_questions":     renderOpen,
     "story.id":         storyId,
     "story.project_id": projectId,
     "story.agent":      storyAgent,
@@ -1160,6 +1605,10 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
           "-not", "-path", "*/dist/*",
           "-not", "-path", "*/.next/*",
           "-not", "-path", "*/build/*",
+          "-not", "-path", "*/logs/*",
+          "-not", "-name", "*.log",
+          "-not", "-name", ".env",
+          "-not", "-name", ".env.*",
         ], { cwd: p.repoPath });
         let out = "";
         child.stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
@@ -1268,18 +1717,19 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   // Either way the comments are marked acknowledged exactly once.
   let effectivePrompt = prompt;
   if (pendingComments.length > 0) {
-    const bodies = pendingComments.map((c, i) => {
+    const bodies = pendingComments.map((c) => {
       const p = c.payload as { body?: string };
-      return pendingComments.length === 1 ? (p.body ?? "") : `${i + 1}. ${p.body ?? ""}`;
+      return p.body ?? "";
     });
     if (existingSessionId) {
-      effectivePrompt = pendingComments.length === 1
-        ? `User comment:\n${bodies[0]}`
-        : `The user has sent the following comments:\n\n${bodies.join("\n\n")}`;
+      // Resumed session: the prior turns are already in Claude's context.
+      // Send the user's reply verbatim as the next user turn — the way
+      // Claude Desktop appends replies — so the agent sees the actual
+      // words typed, not a wrapper. Multiple unacked comments get joined
+      // with blank lines (same order they were posted).
+      effectivePrompt = bodies.join("\n\n");
     } else {
-      const block = pendingComments.length === 1
-        ? bodies[0]
-        : bodies.join("\n\n");
+      const block = bodies.join("\n\n");
       effectivePrompt = `${prompt}\n\n═══ PENDING FEEDBACK — address these before declaring done ═══\n${block}\n═══════════════════════════════════════════════════════════`;
     }
     await Promise.all(
@@ -1303,6 +1753,7 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
         kind,
         actor,
         payload,
+        dispatchInstanceId,
       });
     } catch (err) {
       console.error("[orca] failed to write activity event:", err);
@@ -1373,7 +1824,14 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
       // For fresh sessions only: pass the agent's system prompt so Claude
       // caches it as the system turn. Skipped on --resume because the session
       // already has its system context stored.
-      ...(systemPrompt && !existingSessionId ? ["--system-prompt", systemPrompt] : []),
+      //
+      // `--append-system-prompt` (NOT `--system-prompt`) so the default
+      // system loading still runs — including ~/.claude/CLAUDE.md and any
+      // project-local CLAUDE.md. With `--system-prompt` we replace the
+      // default entirely, which silently turns off CLAUDE.md auto-discovery
+      // and means rules like "rx" → resolve recipes/_index.md never reach
+      // the agent.
+      ...(systemPrompt && !existingSessionId ? ["--append-system-prompt", systemPrompt] : []),
       "-p",
       effectivePrompt,
       "--dangerously-skip-permissions",
@@ -1488,8 +1946,16 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     // under, not just the per-turn main prompt. On --resume runs the
     // system prompt wasn't re-sent (Claude has it cached), but we still
     // record what was in effect at dispatch time.
+    //
+    // `prompt` is what we log as the canonical "what the agent received"
+    // — it's whatever actually went over -p, which on resumed sessions
+    // is the user's reply (verbatim) and on fresh spawns is the rendered
+    // spec (plus any pending-feedback block). The base rendered spec is
+    // logged separately as `basePrompt` only when it differs, so the
+    // activity UI can show diffs if you want them.
     await logEvent("agent_prompt", {
-      prompt,
+      prompt: effectivePrompt,
+      ...(effectivePrompt !== prompt ? { basePrompt: prompt } : {}),
       ...(systemPrompt ? { systemPrompt } : {}),
     });
   } else {
@@ -1511,7 +1977,7 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     // on repeated QA calls against the same unchanged diff.
     //
     // If this adoption crashes before reaching a terminal state, the story
-    // stays in_progress with no PID and no dispatchState — stale-activity
+    // stays implementing with no PID and no dispatchState — stale-activity
     // detection in the heartbeat will eventually catch it and do a fresh
     // recovery via recoverStory.
     const state = adoptExistingPid.state;
@@ -1550,12 +2016,28 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   let totalTokensUsed: number | null = null;
   let capturedSessionId: string | null = null;
   let modelUsed: string | null = null;
+  // Set when --resume errors out before producing any turn (e.g. the CLI
+  // can't find the conversation file: "No conversation found with session
+  // ID: ..."). Detected via a result event with is_error=true and
+  // num_turns=0. The Path 0 fallback below uses this to trigger a fresh
+  // dispatch even when the result event echoed back a session_id (which
+  // would otherwise mask the failure as a "successful" run).
+  let resumeStartFailed = false;
   // Prompt-cache accounting, captured from the CLI's result event. Hoisted
   // out of the per-line handler so dispatch_completed can report them —
   // high cacheReadInputTokens relative to uncached inputTokens is the
   // signal that --resume actually hit the cache.
   let cacheReadInputTokens = 0;
   let cacheCreationInputTokens = 0;
+  // Per-message token accumulators — populated from each assistant turn's
+  // usage object as the stream flows in. Used as a fallback when the
+  // process exits with SIGTERM (exitCode 143) before writing the final
+  // result event, which is the only other source of total token data.
+  // If the result event does fire, it overwrites these via the block below.
+  let msgInTok = 0;
+  let msgOutTok = 0;
+  let msgCacheReadTok = 0;
+  let msgCacheCreateTok = 0;
   let uncachedInputTokens = 0;
 
   // Token-attribution attempt index for THIS do-er run. The QA gate
@@ -1600,6 +2082,33 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     const mAny = msg as Record<string, unknown>;
     if (!capturedSessionId && typeof mAny.session_id === "string") {
       capturedSessionId = mAny.session_id;
+    }
+
+    // Accumulate per-message token counts from each assistant turn. These
+    // serve as a fallback for when the process exits with SIGTERM before
+    // writing the final result event. Each assistant message in stream-json
+    // carries a usage object with the same token fields as the result event.
+    if (mAny.type === "assistant") {
+      const msgObj = (mAny.message && typeof mAny.message === "object"
+        ? mAny.message
+        : null) as Record<string, unknown> | null;
+      const u = (msgObj?.usage && typeof msgObj.usage === "object"
+        ? msgObj.usage
+        : null) as Record<string, unknown> | null;
+      if (u) {
+        msgInTok += typeof u.input_tokens === "number" ? u.input_tokens : 0;
+        msgOutTok += typeof u.output_tokens === "number" ? u.output_tokens : 0;
+        msgCacheReadTok += typeof u.cache_read_input_tokens === "number"
+          ? u.cache_read_input_tokens : 0;
+        msgCacheCreateTok += typeof u.cache_creation_input_tokens === "number"
+          ? u.cache_creation_input_tokens : 0;
+      }
+      // Track the model in use from individual messages so it's available
+      // even when the result event doesn't fire.
+      const msgModel = msgObj?.model;
+      if (typeof msgModel === "string" && msgModel && !modelUsed) {
+        modelUsed = msgModel;
+      }
     }
 
     // Detect rate-limit signals in stream-json events and extract
@@ -1686,6 +2195,21 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     // variants so we don't silently miss the data.
     const m = msg as Record<string, unknown>;
     if (m.type === "result") {
+      // Detect a --resume that errored out before producing any turn.
+      // The CLI still emits a result event with the session_id we passed
+      // in, so capturedSessionId is truthy and the existingSessionId &&
+      // !capturedSessionId guard below would miss it. num_turns === 0
+      // combined with is_error === true is the load-bearing signal that
+      // the run never started.
+      if (
+        existingSessionId &&
+        m.is_error === true &&
+        typeof m.num_turns === "number" &&
+        m.num_turns === 0
+      ) {
+        resumeStartFailed = true;
+      }
+
       const cost =
         typeof m.total_cost_usd === "number"
           ? m.total_cost_usd
@@ -1797,6 +2321,7 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     }
   };
 
+  let authErrorSelfHealed = false;
   const flushStderrLines = async (chunk: Buffer): Promise<void> => {
     stderrBuf += chunk.toString("utf8");
     const lastNl = stderrBuf.lastIndexOf("\n");
@@ -1806,6 +2331,28 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     for (const line of complete.split("\n")) {
       if (!line.trim()) continue;
       await logEvent("agent_log", { stream: "stderr", line });
+
+      // Detect Anthropic 401 from the claude CLI. The usual cause is that
+      // CLAUDE_CODE_OAUTH_TOKEN was inherited from the parent shell at server
+      // launch time and has since gone stale; clearing it forces future
+      // spawns to fall back to the macOS keychain entry, which Claude Desktop
+      // keeps refreshed.
+      if (
+        !authErrorSelfHealed &&
+        (/"type"\s*:\s*"authentication_error"/i.test(line) ||
+          /API Error:\s*401/i.test(line))
+      ) {
+        authErrorSelfHealed = true;
+        const hadEnvToken = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+        if (hadEnvToken) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+        console.warn(
+          `[orca] auth error detected (stderr) for story ${storyId}; clearedEnvToken=${hadEnvToken} — next claude spawn will use keychain creds`,
+        );
+        await logEvent("auth_error_self_heal", {
+          stderrLine: line.slice(0, 500),
+          clearedEnvToken: hadEnvToken,
+        });
+      }
 
       // Detect rate-limit activity and log PID count for threshold calibration.
       // Try to extract retry_after from stderr text (e.g. "retry after 30s",
@@ -1944,6 +2491,83 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   if (stderrBuf.trim())
     await logEvent("agent_log", { stream: "stderr", line: stderrBuf });
 
+  // Fallback: if the result event never fired (process killed via SIGTERM
+  // before it could write the final event), scan the raw log file for token
+  // data from individual assistant messages. The log file is the authoritative
+  // source — written directly by the Claude CLI, never affected by server
+  // restarts, vite-node hot-reloads, or adoption gaps. Each assistant message
+  // in the stream carries a usage object with the same token fields as the
+  // result event. Summing them across all turns gives an accurate total.
+  //
+  // We always use the log scan (not in-memory accumulators) because:
+  //   1. In-memory accumulators are zero when the dispatch was adopted after a
+  //      server hot-reload (adoption sets stdoutOffset=file_size, skipping all
+  //      prior events).
+  //   2. Two concurrent dispatch runners (original + adopted vite-node module)
+  //      may both execute the fallback; the file scan is idempotent — both
+  //      compute the same total so the last DB write wins cleanly.
+  if (totalTokensUsed == null && stdoutPath) {
+    let scanInTok = 0;
+    let scanOutTok = 0;
+    let scanCacheReadTok = 0;
+    let scanCacheCreateTok = 0;
+    let scanModel: string | null = null;
+    try {
+      const rawLog = await readFile(stdoutPath, "utf-8");
+      for (const rawLine of rawLog.split("\n")) {
+        const t = rawLine.trim();
+        if (!t) continue;
+        let evt: Record<string, unknown>;
+        try { evt = JSON.parse(t) as Record<string, unknown>; } catch { continue; }
+        if (evt.type !== "assistant") continue;
+        const msgObj = (evt.message && typeof evt.message === "object"
+          ? evt.message : null) as Record<string, unknown> | null;
+        const u = (msgObj?.usage && typeof msgObj.usage === "object"
+          ? msgObj.usage : null) as Record<string, unknown> | null;
+        if (u) {
+          scanInTok += typeof u.input_tokens === "number" ? u.input_tokens : 0;
+          scanOutTok += typeof u.output_tokens === "number" ? u.output_tokens : 0;
+          scanCacheReadTok += typeof u.cache_read_input_tokens === "number"
+            ? u.cache_read_input_tokens : 0;
+          scanCacheCreateTok += typeof u.cache_creation_input_tokens === "number"
+            ? u.cache_creation_input_tokens : 0;
+        }
+        if (!scanModel) {
+          const m = msgObj?.model;
+          if (typeof m === "string" && m) scanModel = m;
+        }
+      }
+      console.log(`[orca] log-scan tokens (exitCode ${exitCode}): in=${scanInTok} out=${scanOutTok} cacheRead=${scanCacheReadTok} cacheCreate=${scanCacheCreateTok}`);
+    } catch (scanErr) {
+      console.warn("[orca] log scan for token fallback failed:", scanErr);
+    }
+
+    const scanTotal = scanInTok + scanOutTok + scanCacheReadTok + scanCacheCreateTok;
+    if (scanTotal > 0) {
+      totalTokensUsed = scanTotal;
+      cacheReadInputTokens = scanCacheReadTok;
+      cacheCreationInputTokens = scanCacheCreateTok;
+      uncachedInputTokens = scanInTok;
+      if (totalCostUsd == null) {
+        const model = (scanModel ?? modelUsed)?.toLowerCase() ?? "";
+        let inPrice = 3.0, outPrice = 15.0, readPrice = 0.3, createPrice = 3.75;
+        if (model.includes("opus")) {
+          inPrice = 15.0; outPrice = 75.0; readPrice = 1.5; createPrice = 18.75;
+        } else if (model.includes("haiku")) {
+          inPrice = 0.8; outPrice = 4.0; readPrice = 0.08; createPrice = 1.0;
+        }
+        totalCostUsd = (
+          scanInTok * inPrice +
+          scanOutTok * outPrice +
+          scanCacheReadTok * readPrice +
+          scanCacheCreateTok * createPrice
+        ) / 1_000_000;
+        if (totalCostUsd === 0) totalCostUsd = null;
+      }
+      console.log(`[orca] using log-scan fallback: tokens=${scanTotal}, approx cost=${totalCostUsd}`);
+    }
+  }
+
   // Collect everything the agent touched via mtime, plus git diffs if we
   // happen to be in a repo. We capture two diffs:
   //   - gitDiff: only this session's changes (vs the pre-dispatch snapshot)
@@ -1979,6 +2603,15 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     totalInputTokensSeen > 0
       ? cacheReadInputTokens / totalInputTokensSeen
       : null;
+
+  // A clean dispatch completion clears any prior fail-count: those strikes
+  // were either transient or caused by the now-fixed wake-drop wedge, and
+  // letting them accumulate forever causes the next stale tick to falsely
+  // block a story that's actually been making progress.
+  await db
+    .update(schema.stories)
+    .set({ dispatchFailCount: 0 })
+    .where(eq(schema.stories.id, storyId));
 
   await logEvent("dispatch_completed", {
     exitCode,
@@ -2041,9 +2674,13 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   };
 
   // Path 0: --resume failed (session not found / CLI doesn't support it).
-  // Detected when we passed --resume, the process exited non-zero, and no
-  // session_id was captured (meaning the CLI never got past init). Clear
-  // the stale session ID and retry without --resume.
+  // Two failure modes:
+  //   (a) CLI never got past init — no session_id captured at all.
+  //   (b) CLI emitted a result event echoing the session_id we passed in
+  //       but with is_error=true and num_turns=0 (e.g. "No conversation
+  //       found with session ID: ..."). resumeStartFailed catches this.
+  // Both cases mean the stale session ID will keep failing forever; clear
+  // it and retry without --resume.
   //
   // Guarded by `_resumeFallback` so a second failure on the retried fresh
   // run falls through to normal error handling instead of looping. The
@@ -2053,7 +2690,7 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     !args._resumeFallback &&
     exitCode !== 0 &&
     existingSessionId &&
-    !capturedSessionId
+    (!capturedSessionId || resumeStartFailed)
   ) {
     console.log(
       `[orca] --resume failed for story ${storyId} (session ${existingSessionId}), retrying without --resume`,
@@ -2112,39 +2749,26 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   }
 
   // Path 2: Agent exited cleanly. The agent's prompt is responsible for
-  // updating status/agent via the Orca API before exiting. If the story is
-  // still in_progress (agent exited without self-transitioning), bump it back
-  // to backlog so the heartbeat picks it up on the next tick.
-  {
-  const [postRunStory] = await db
-    .select({ status: schema.stories.status, agent: schema.stories.agent })
-    .from(schema.stories)
-    .where(eq(schema.stories.id, storyId));
-
+  // updating status/agent via the Orca API before exiting. We just clear
+  // the dispatch tracking columns and snapshot accumulated cost. Dispatch
+  // is a blind "do the job" — what runs next is decided by heartbeat, the
+  // manual dispatch endpoint, or the wake endpoint, not by this function.
+  // If the agent left the story implementing without transitioning, the
+  // stale-activity branch of heartbeat will pick it up on a later tick.
   await db
     .update(schema.stories)
     .set({ dispatchPid: null, dispatchState: null, updatedAt: new Date(), ...costSnapshot })
     .where(eq(schema.stories.id, storyId));
 
-  // If the story landed in backlog with an agent (either the agent handed off
-  // to a new agent and called wake, or exited without transitioning), fire the
-  // next dispatch immediately instead of waiting for the heartbeat interval.
-  if (postRunStory?.status === "backlog" && postRunStory.agent) {
-    runClaudeDispatch(args).catch((err) =>
-      handleDispatchRejection(db, storyId, err, {
-        context: "auto-handoff dispatch failed",
-        revertStatus: true,
-      }),
-    );
-  }
-  }
-
   } finally {
     // Release the lifecycle guard no matter how we exit — terminal state,
-    // thrown error, early return, or awaited retry recursion. On a fresh
-    // Node process, this set is empty, so heartbeat correctly treats every
-    // DB-tracked dispatch from the previous Node process as orphaned.
-    activeLifecycles.delete(storyId);
+    // thrown error, early return, or awaited retry recursion. The ref-count
+    // semantics mean a co-racer's count survives our decrement: if A and B
+    // both acquired and B drops in the claim guard, B's release leaves A's
+    // count at 1. On a fresh Node process the Map is empty, so heartbeat
+    // correctly treats every DB-tracked dispatch from the previous Node
+    // process as orphaned.
+    releaseLifecycle(storyId);
   }
 }
 
@@ -2179,6 +2803,18 @@ async function listChangedFiles(
         "-not",
         "-path",
         "*/build/*",
+        "-not",
+        "-path",
+        "*/logs/*",
+        "-not",
+        "-name",
+        "*.log",
+        "-not",
+        "-name",
+        ".env",
+        "-not",
+        "-name",
+        ".env.*",
       ],
       { cwd },
     );

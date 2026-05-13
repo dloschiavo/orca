@@ -3,6 +3,7 @@ import { createApp } from "./app.js";
 import { createDb, startEmbeddedPg } from "@orca/db";
 import { runMigrations } from "./db/migrate.js";
 import { startHeartbeat } from "./services/heartbeat.js";
+import { startAvailableModelsRefresh } from "./services/available-models.js";
 
 const PORT = Number(process.env.PORT ?? 4455);
 
@@ -31,15 +32,23 @@ async function main() {
     console.log(`[orca] server listening on http://localhost:${info.port}`);
   });
 
-  // Start heartbeat loop — default 5 min (300 000 ms), override via env.
+  // Start heartbeat loop — default 1 min (60 000 ms), override via env.
+  // Concurrency gates are cheap, non-LLM checks, so the tighter cadence is
+  // fine. Liveness windows are pinned to absolute durations inside the tick.
   const heartbeatMs = Number(
-    process.env.ORCA_HEARTBEAT_INTERVAL_MS ?? 5 * 60 * 1000,
+    process.env.ORCA_HEARTBEAT_INTERVAL_MS ?? 60 * 1000,
   );
   const stopHeartbeat = startHeartbeat(db, heartbeatMs);
+
+  // Keep the Anthropic model list fresh so newly-shipped models show up
+  // in the agent dropdown and the `{models.list}` prompt placeholder
+  // without a server-code change.
+  const stopModelsRefresh = startAvailableModelsRefresh();
 
   const shutdown = async () => {
     console.log("\n[orca] shutting down...");
     stopHeartbeat();
+    stopModelsRefresh();
     server.close();
     if (stopEmbedded) await stopEmbedded();
     process.exit(0);
