@@ -1,22 +1,26 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api.js";
+import { useProjectContext } from "../state/ProjectContext.js";
+import { ServerEndpointPips } from "./ServerEndpointPips.js";
 
 interface TopbarProps {
   activeCount: number;
   queueDepth: number;
   nextTickIn: number;
-  shippedToday: number;
 }
 
-export function Topbar({ activeCount, queueDepth, nextTickIn, shippedToday }: TopbarProps) {
+export function Topbar({ activeCount, queueDepth, nextTickIn }: TopbarProps) {
+  const { activeProjectId } = useProjectContext();
+  const qc = useQueryClient();
+
   const { data: statusData } = useQuery({
     queryKey: ["server-status"],
     queryFn: () => api.projects.serverStatus(),
     refetchInterval: 10_000,
   });
 
-  const serverUp = (statusData?.statuses ?? []).some(
-    (s) => s.endpoints?.some((e) => e.running)
+  const projectStatus = (statusData?.statuses ?? []).find(
+    (s) => s.projectId === activeProjectId,
   );
 
   return (
@@ -29,11 +33,14 @@ export function Topbar({ activeCount, queueDepth, nextTickIn, shippedToday }: To
         </div>
 
         <div className="tb-server">
-          <span className="tb-server-dot" style={serverUp ? {} : { background: "var(--attn-error)" }} />
-          <span className="tb-server-label">server</span>
-          <code className="tb-server-host">localhost:4455</code>
-          <span className="tb-server-sep">·</span>
-          <span className="tb-server-meta">{shippedToday} shipped today</span>
+          <ServerEndpointPips
+            projectId={activeProjectId}
+            endpoints={projectStatus?.endpoints ?? []}
+            strayProcesses={projectStatus?.strayProcesses ?? []}
+            onChange={() =>
+              qc.invalidateQueries({ queryKey: ["server-status"] })
+            }
+          />
         </div>
 
         <div className="tb-status">
@@ -52,9 +59,9 @@ export function Topbar({ activeCount, queueDepth, nextTickIn, shippedToday }: To
             <span className="lbl">next tick</span>
             <code className="num mono">{nextTickIn}s</code>
           </span>
-          <span className="tb-key">⌘ K</span>
         </div>
       </div>
     </div>
   );
 }
+

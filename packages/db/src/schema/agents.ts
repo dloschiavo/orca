@@ -44,6 +44,11 @@ export const agents = pgTable(
     // the result and skip the expensive model. If uncertain we escalate
     // to the `model` column above.
     fastModel: text("fast_model"),
+    // Per-agent turn cap. Maps to `claude --max-turns N`. Null = no cap
+    // (CLI default). Lower caps force tighter scope and shrink the
+    // accumulated tool-result context that gets billed as cache_read
+    // on every subsequent turn — the dominant per-dispatch cost.
+    maxTurns: integer("max_turns"),
     // Soft-delete: null = active, timestamp = archived at that time.
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })

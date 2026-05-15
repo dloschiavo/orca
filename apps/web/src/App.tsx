@@ -2,8 +2,10 @@ import { useState, useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Topbar } from "./components/Topbar.js";
+import { Statusbar } from "./components/Statusbar.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ErrorToaster } from "./components/ErrorToaster.js";
+import { OfflineBanner } from "./components/OfflineBanner.js";
 import { ClaudeAuthGate } from "./components/ClaudeAuthGate.js";
 import { ProjectProvider } from "./state/ProjectContext.js";
 import { StoriesWorkspacePage } from "./pages/StoriesWorkspacePage.js";
@@ -37,13 +39,14 @@ function AppShell() {
   });
 
   const allCounts = storyCounts?.counts ?? [];
-  const activeCount = allCounts
-    .filter((c) => c.status === "implementing")
-    .reduce((sum, c) => sum + c.count, 0);
+  // "agents working" = stories with a live dispatched agent process. Using
+  // `implementing` status here would double-count any story the user is hand-
+  // editing whose status hasn't transitioned.
+  const activeCount = storyCounts?.agentsWorking ?? 0;
   const queueDepth = allCounts
     .filter((c) => !["done", "canceled"].includes(c.status))
     .reduce((sum, c) => sum + c.count, 0);
-  const shippedToday = allCounts
+  const doneToday = allCounts
     .filter((c) => c.status === "done")
     .reduce((sum, c) => sum + c.count, 0);
 
@@ -53,7 +56,6 @@ function AppShell() {
         activeCount={activeCount}
         queueDepth={queueDepth}
         nextTickIn={nextTickIn}
-        shippedToday={shippedToday}
       />
       <Sidebar />
       <main className="main">
@@ -71,6 +73,7 @@ function AppShell() {
           <Route path="/settings" element={<ScrollPage><SettingsPage /></ScrollPage>} />
         </Routes>
       </main>
+      <Statusbar doneToday={doneToday} />
     </div>
   );
 }
@@ -82,6 +85,7 @@ function ScrollPage({ children }: { children: React.ReactNode }) {
 export function App() {
   return (
     <ProjectProvider>
+      <OfflineBanner />
       <ClaudeAuthGate>
         <ErrorToaster />
         <AppShell />

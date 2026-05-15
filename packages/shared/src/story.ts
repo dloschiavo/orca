@@ -21,6 +21,9 @@ export interface Story {
   agentOverride: string | null;
   agentOverrideReason: string | null;
   parentStoryId: string | null;
+  // Other story IDs this story is structurally blocked by. Surfaced in the
+  // story-detail Hierarchy tab so the dependency graph is visible.
+  prereqStoryIds: string[];
   labels: string[];
   priority: number;
   createdAt: string;

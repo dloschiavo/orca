@@ -51,7 +51,12 @@ if (!process.env.CLAUDE_BIN) {
   }
 }
 
-const PORT = Number(process.env.PORT ?? 4455);
+if (!process.env.PORT) {
+  throw new Error(
+    "[orca] PORT is not set. Run via `pnpm dev` or `pnpm start` so service-ports.mjs resolves it from package.json's goliath.canonicalPort.",
+  );
+}
+const PORT = Number(process.env.PORT);
 
 async function main() {
   // Check Claude auth before anything else — print a loud banner if not logged in.
@@ -110,3 +115,6 @@ main().catch((err) => {
   console.error("[orca] fatal:", err);
   process.exit(1);
 });
+
+
+

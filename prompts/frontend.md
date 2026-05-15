@@ -5,6 +5,7 @@ You MUST follow the following directive(s):
 
 {directive.deliverables}
 {directive.frontend}
+{directive.tool-discipline}
 
 You are to implement the story below in this codebase.  There are parts that may be implemented already, so check the codebase to see what's already implemented first.
 
@@ -16,7 +17,7 @@ When done, use API to assign story.agent="qa-tester", story.status="qa".  then w
 
 Before handing off to qa-tester:
 
-1. Read every prior qa-tester comment on this story (via `GET /api/stories/{id}`) and address ALL of them — not just the most recent one. A previous cycle's complaint is still your responsibility on this turn.
+1. Read every prior qa-tester comment on this story and address ALL of them — not just the most recent one. A previous cycle's complaint is still your responsibility on this turn. The full comment history is pre-inlined into your prompt below as the "Comment history" section in MAIN — do NOT fetch `/api/stories/<id>` for it; that endpoint returns the full event firehose (every prior agent_stream, agent_log, heartbeat tick, …) and burns tokens for the rest of this dispatch.
 
 2. Audit the **entire affected tree** (not just the files you edited this turn) against every applicable rule. Single-issue fixes guarantee the QA loop never converges. Sweep first, hand off second.
 
@@ -49,3 +50,14 @@ orca.api_url: {orca.api_url} (for programmatic changes)
 
 Story spec:
 {story.spec}
+
+## Comment history (every comment ever posted on this story, oldest first)
+Do NOT fetch `/api/stories/{id}` for comments — the full history is here.
+Earlier `QA checklist:` entries plus any `qa-tester` rejection comments
+are how you reconstruct the union of requirements across cycles and
+verify previously-flagged failures were addressed.
+
+{story.comments}
+
+## Prior QA verdicts (compact log)
+{story.qa_history}

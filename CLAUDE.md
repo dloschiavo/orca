@@ -20,6 +20,15 @@ pnpm --filter @orca/web dev &>/tmp/orca-web.log &
 
 Wait for the server to be reachable (`curl -s http://localhost:4455/health`) before declaring the task done.
 
+**If you kill or restart EITHER the backend or the frontend, you MUST verify the other one is still alive and restart it if not.** Killing port 4455 does not affect 5173 directly, but it's common for one or both to have died earlier in the session for unrelated reasons — and a half-running stack ships broken to the user. Before declaring done, run both checks:
+
+```bash
+lsof -ti:4455 >/dev/null && echo "backend up" || echo "backend DOWN"
+lsof -ti:5173 >/dev/null && echo "frontend up" || echo "frontend DOWN"
+```
+
+Restart whichever is down using the commands above.
+
 ## Database schema changes
 
 The schema lives in `packages/db/src/schema/*.ts` (Drizzle). The server runs

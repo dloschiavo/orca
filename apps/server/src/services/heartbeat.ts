@@ -7,19 +7,17 @@ import { resolveModelForStory } from "../agents/model.js";
 import { isConcurrencyExceeded, countClaudeProcesses, getConcurrencyCap, isRateLimited, getRateLimitInfo } from "./concurrency.js";
 import { handleDispatchRejection } from "./dispatch-rejection.js";
 import { getThrottleSettings } from "./throttle.js";
+import { isPidAlive } from "./pid.js";
 
 const MAX_FAIL_COUNT = 3;
 
-/** Check whether a process with the given PID is still running. */
-function isPidAlive(pid: number): boolean {
-  try {
-    // signal 0 doesn't kill — it just checks if the process exists.
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// Activity-event actors that are NOT proof of agent life. The reaper uses
+// *agent activity* — events written by the dispatched claude process — as
+// the signal that a story is still progressing. Heartbeat / system / user
+// / auditor events are bookkeeping noise and must not keep a wedged agent
+// alive: without this filter the reaper feedback-loops on its own
+// `concurrency_deferred` / `dispatch_started` writes.
+const NON_AGENT_ACTORS = ["heartbeat", "system", "user", "auditor"];
 
 /**
  * Recover a story whose agent process has died or gone stale.
@@ -338,22 +336,25 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
     .where(isNotNull(schema.stories.dispatchPid));
 
   for (const story of allInProgress) {
-    if (handledIds.has(story.id)) continue;
+    // NOTE: this loop deliberately does NOT short-circuit on
+    // `handledIds.has(story.id)` or `isDispatchLifecycleActive(story.id)`.
+    // Earlier versions did, which silently disabled stale-activity reaping
+    // for every modern dispatch: any story with `dispatchState` set hit the
+    // dead-PID adoption branch (handledIds.add), and any story whose
+    // runClaudeDispatch was still pending hit the lifecycle-active branch.
+    // The lifecycle has no stale-output watchdog of its own — it just
+    // awaits child exit — so a claude wrapper hung on a stuck Bash-tool
+    // subprocess would keep `dispatchPid`/`dispatchState` set forever.
+    // Treat stale-activity as the universal fallback timer: 5 minutes of
+    // agent silence → kill the process group regardless of in-process
+    // lifecycle state. The lifecycle's exit handler then runs naturally.
 
-    // Same lifecycle guard as the dead-PID loop: if Node is still actively
-    // running the dispatch lifecycle for this story (do-er, QA, retry),
-    // don't let stale-activity detection steal it out from under the
-    // in-flight dispatch. QA can legitimately produce no activity events
-    // for longer than the heartbeat interval while it waits for its own
-    // claude child to return JSON.
-    if (isDispatchLifecycleActive(story.id)) {
-      console.log(
-        `[orca/heartbeat] story ${story.id} stale-check skipped — lifecycle is active`,
-      );
-      continue;
-    }
-
-    // Check for any activity within the heartbeat interval.
+    // Check for recent *agent* activity within the heartbeat interval.
+    // Definitionally, a story is alive iff its agent process is writing
+    // events. Heartbeat / system / user / auditor events do not count —
+    // counting them creates a feedback loop where the heartbeat's own
+    // `concurrency_deferred` / `dispatch_started` writes keep a wedged
+    // agent looking alive forever.
     const [recent] = await db
       .select({ id: schema.activityEvents.id })
       .from(schema.activityEvents)
@@ -361,6 +362,10 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
         and(
           eq(schema.activityEvents.storyId, story.id),
           sql`${schema.activityEvents.createdAt} >= ${cutoff.toISOString()}`,
+          sql`${schema.activityEvents.actor} NOT IN (${sql.join(
+            NON_AGENT_ACTORS.map((a) => sql`${a}`),
+            sql`, `,
+          )})`,
         ),
       )
       .limit(1);
@@ -368,23 +373,43 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
     if (recent) continue;
 
     // No activity in the last interval — story is stale.
+    const lifecycleActive = isDispatchLifecycleActive(story.id);
     console.log(
-      `[orca/heartbeat] story ${story.id} has no activity since ${cutoff.toISOString()}, recovering...`,
+      `[orca/heartbeat] story ${story.id} has no activity since ${cutoff.toISOString()} (lifecycleActive=${lifecycleActive}), killing PID...`,
     );
 
-    // Kill the process if it's still alive.
+    // Kill the process group if it's still alive. Claude is spawned with
+    // `detached: true` so its PID is also the pgid — `kill(-pid)` cascades
+    // to every descendant (Bash-tool subprocesses, MCP servers, etc.).
+    // Without the negative pid, an orphaned bash subprocess keeps stdio
+    // open and the claude wrapper never exits, and the whole reap is
+    // pointless. Fall back to a plain `kill(pid)` if pgid kill fails
+    // (e.g. the leader already exited but children re-parented).
     const pid = story.dispatchPid;
     if (pid != null && isPidAlive(pid)) {
-      console.log(
-        `[orca/heartbeat] killing stale process ${pid} for story ${story.id}`,
-      );
       try {
-        process.kill(pid, "SIGTERM");
+        process.kill(-pid, "SIGTERM");
       } catch {
-        // Process may have exited between check and kill — ignore.
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {
+          // Process may have exited between check and kill — ignore.
+        }
       }
     }
 
+    // If a runClaudeDispatch lifecycle is still active in this Node, its
+    // `child.on("exit")` handler will fire as soon as the SIGTERM lands
+    // and will run the normal completion path (dispatch_completed event,
+    // clear dispatchPid/dispatchState, release lifecycle). Calling
+    // recoverStory here would race that teardown and spawn a duplicate
+    // claude on top of the still-finishing one. Heartbeat pickup on a
+    // later tick will re-dispatch the row once the columns are clear.
+    if (lifecycleActive) continue;
+
+    // No in-process lifecycle — legacy/orphaned row (e.g. server restarted
+    // mid-dispatch and `dispatchState` was never persisted). Fall back to
+    // respawn-from-scratch recovery.
     await recoverStory(db, story, "stale", pid);
   }
 
@@ -528,10 +553,22 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
       .where(isNotNull(schema.stories.dispatchPid));
 
     // Mutable counters: updated as we dispatch so per-story checks stay accurate.
-    let throttleTotalInProgress = currentlyInProgress.length;
+    //
+    // `throttleTotalInProgress` and `throttleByProject` represent the
+    // *impl pipeline* footprint — every active dispatch EXCEPT spec-writer
+    // and qa-tester. Both of those have their own independent caps and
+    // must not burn impl-pipeline slots (per-project or global), otherwise
+    // a project with a spec-writer or a qa-tester running blocks its own
+    // frontend/backend agent from being picked up — and the impl-pipeline
+    // cap being saturated would in turn block spec-writer / qa-tester
+    // dispatches that should run regardless.
+    const implPipelineInProgress = currentlyInProgress.filter(
+      (s) => s.agent !== "spec-writer" && s.agent !== "qa-tester",
+    );
+    let throttleTotalInProgress = implPipelineInProgress.length;
     const throttleByProject = new Map<string, number>();
     // Count of QA-tester agents actively running. QA spikes system load —
-    // cap how many can run simultaneously.
+    // cap how many can run simultaneously. Independent of impl pipeline.
     let throttleQaInProgress = currentlyInProgress.filter(
       (s) => s.agent === "qa-tester",
     ).length;
@@ -542,7 +579,7 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
     let throttleSpecWriterInProgress = currentlyInProgress.filter(
       (s) => s.agent === "spec-writer",
     ).length;
-    for (const s of currentlyInProgress) {
+    for (const s of implPipelineInProgress) {
       throttleByProject.set(
         s.projectId,
         (throttleByProject.get(s.projectId) ?? 0) + 1,
@@ -557,10 +594,12 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
       for (const story of assigned) {
         if (dispatched >= slots) break;
 
-        // Spec-writer dispatches don't compete with implementing-pipeline
-        // slots — they have their own concurrency cap. Skip the implementing
-        // throttles entirely for them.
+        // Spec-writer and qa-tester dispatches don't compete with the
+        // implementing-pipeline slots — each has its own independent
+        // concurrency cap. Skip the impl-pipeline throttles entirely for them.
         const isSpecWriter = story.agent === "spec-writer";
+        const isQa = story.agent === "qa-tester";
+        const isImplPipeline = !isSpecWriter && !isQa;
 
         // ── Throttle: spec-writer concurrent cap ───────────────────
         if (
@@ -585,23 +624,39 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
         }
 
         // ── Throttle: total in-progress cap ────────────────────────
-        // Spec-writer dispatches are exempt — they have their own cap.
+        // Spec-writer and qa-tester are exempt — each has its own
+        // independent cap. Use `continue` (not `break`) so stories with
+        // independent caps later in the iteration order still get a
+        // chance to be evaluated. `assigned` is sorted by token-count
+        // desc, so a token-heavy impl story arriving first must not bury
+        // spec-writers or qa-testers behind it.
         if (
-          !isSpecWriter &&
+          isImplPipeline &&
           throttleTotalInProgress >= throttle.maxConcurrentTotal
         ) {
           console.log(
-            `[orca/heartbeat] throttle: total dispatched (${throttleTotalInProgress}) >= maxConcurrentTotal (${throttle.maxConcurrentTotal}), stopping pickup`,
+            `[orca/heartbeat] throttle: total dispatched (${throttleTotalInProgress}) >= maxConcurrentTotal (${throttle.maxConcurrentTotal}), deferring story ${story.id}`,
           );
-          break;
+          await db.insert(schema.activityEvents).values({
+            storyId: story.id,
+            kind: "concurrency_deferred",
+            actor: "heartbeat",
+            payload: {
+              trigger: "throttle-total",
+              totalInProgress: throttleTotalInProgress,
+              maxConcurrentTotal: throttle.maxConcurrentTotal,
+              reason: `total impl-pipeline throttle limit reached (${throttleTotalInProgress}/${throttle.maxConcurrentTotal})`,
+            },
+          });
+          continue;
         }
 
         // ── Throttle: max concurrent QA ────────────────────────────
         // qa-tester dispatches spike system load — cap how many can run
         // simultaneously. Story stays in `qa` and waits for the next tick.
-        // This is a sub-cap within total — not additive.
+        // Independent of the impl-pipeline caps.
         if (
-          story.agent === "qa-tester" &&
+          isQa &&
           throttleQaInProgress >= throttle.maxConcurrentQa
         ) {
           console.log(
@@ -622,10 +677,10 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
         }
 
         // ── Throttle: per-project in-progress cap ──────────────────
-        // Spec-writer dispatches are exempt — they have their own global cap.
+        // Spec-writer and qa-tester are exempt — each has its own global cap.
         const projectInProgress = throttleByProject.get(story.projectId) ?? 0;
         if (
-          !isSpecWriter &&
+          isImplPipeline &&
           projectInProgress >= throttle.maxConcurrentPerProject
         ) {
           console.log(
@@ -705,16 +760,17 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
         );
 
         // Update local throttle counters to reflect this new dispatch.
-        // Spec-writer pickups don't count against the implementing
-        // pipeline throttles — they have their own cap.
-        if (!isSpecWriter) {
+        // Only impl-pipeline pickups (not spec-writer, not qa-tester)
+        // bump the total / per-project counters — those two have their
+        // own independent caps.
+        if (isImplPipeline) {
           throttleTotalInProgress++;
           throttleByProject.set(
             story.projectId,
             (throttleByProject.get(story.projectId) ?? 0) + 1,
           );
         }
-        if (story.agent === "qa-tester") {
+        if (isQa) {
           throttleQaInProgress++;
         }
         if (isSpecWriter) {
@@ -726,6 +782,20 @@ async function tick(db: OrcaDb, intervalMs: number): Promise<void> {
   }
 }
 
+// Handle to the active heartbeat timer, stashed on globalThis so it
+// survives vite-node --watch re-evaluations. vite-node re-evaluates
+// index.ts (and everything it imports) on any watched-file change, which
+// re-invokes startHeartbeat with a fresh module instance — a module-scoped
+// `let` would reset to null and lose the prior handle. Node keeps the old
+// timer alive in the event loop, so without persistent tracking each
+// re-eval leaks another setInterval, and within minutes you have N timers
+// all firing tick() at independent offsets.
+const TIMER_KEY = "__orcaHeartbeatTimer";
+type TimerHandle = ReturnType<typeof setInterval>;
+type GlobalWithTimer = typeof globalThis & {
+  [TIMER_KEY]?: TimerHandle | null;
+};
+
 /**
  * Starts the heartbeat loop. Returns a cleanup function to stop it.
  */
@@ -733,6 +803,13 @@ export function startHeartbeat(
   db: OrcaDb,
   intervalMs = 60 * 1000,
 ): () => void {
+  const g = globalThis as GlobalWithTimer;
+  if (g[TIMER_KEY]) {
+    clearInterval(g[TIMER_KEY]);
+    g[TIMER_KEY] = null;
+    console.log("[orca/heartbeat] cleared previous timer before restart");
+  }
+
   console.log(
     `[orca/heartbeat] starting heartbeat loop (interval: ${intervalMs}ms)`,
   );
@@ -742,6 +819,7 @@ export function startHeartbeat(
       console.error("[orca/heartbeat] tick failed:", err);
     });
   }, intervalMs);
+  g[TIMER_KEY] = timer;
 
   // Run one tick immediately on startup to catch anything that died while
   // the server was down.
@@ -750,7 +828,10 @@ export function startHeartbeat(
   });
 
   return () => {
-    clearInterval(timer);
+    if (g[TIMER_KEY]) {
+      clearInterval(g[TIMER_KEY]);
+      g[TIMER_KEY] = null;
+    }
     console.log("[orca/heartbeat] stopped");
   };
 }

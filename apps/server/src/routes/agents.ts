@@ -43,6 +43,7 @@ function buildPromptFile(system: string, main: string): string {
 const patchSchema = z.object({
   model: z.string().nullable().optional(),
   fastModel: z.string().nullable().optional(),
+  maxTurns: z.number().int().positive().nullable().optional(),
   description: z.string().optional(),
   agentsMd: z.string().optional(),
 });
@@ -132,6 +133,7 @@ export function agentsRoutes(): Hono<OrcaEnv> {
     const updates: Record<string, unknown> = { updatedAt: new Date() };
     if (body.model !== undefined) updates.model = body.model;
     if (body.fastModel !== undefined) updates.fastModel = body.fastModel;
+    if (body.maxTurns !== undefined) updates.maxTurns = body.maxTurns;
     if (body.description !== undefined) updates.description = body.description;
     if (body.agentsMd !== undefined) updates.agentsMd = body.agentsMd;
 

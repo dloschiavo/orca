@@ -12,13 +12,14 @@ import type { StoryStatus } from "@orca/shared";
 import type { OrcaEnv } from "../app.js";
 import type { OrcaDb, DispatchState } from "@orca/db";
 import type { ChildProcess } from "node:child_process";
-import { resolveModelForStory, resolveModelForAgent } from "../agents/model.js";
+import { resolveModelForStory, resolveModelForAgent, resolveMaxTurnsForAgent } from "../agents/model.js";
 import { getRegisteredAgentNames, getRegisteredAgentsWithDescriptions, loadPrompt, assertSystemPromptStable, renderPromptLazy, once } from "../services/prompt-loader.js";
 import { enforceStoryTokenBudget } from "../services/token-budget.js";
 import { isConcurrencyExceeded, countClaudeProcesses, getConcurrencyCap, recordRateLimit, isRateLimited, getRateLimitInfo, recordUsageFraction, persistUsageFraction, extractUsageFraction } from "../services/concurrency.js";
 import { extractModelFromStreamResult, extractModelFromCliWrapper } from "../services/token-usage.js";
 import { handleDispatchRejection } from "../services/dispatch-rejection.js";
 import { storyEvents } from "../services/story-events.js";
+import { isPidAlive } from "../services/pid.js";
 
 // CLAUDE_BIN is written to apps/server/.env.local by setup-env.ts (runs on
 // postinstall / predev) and loaded into process.env by index.ts before main().
@@ -57,22 +58,6 @@ if (!(_g._orcaActiveLifecycles instanceof Map)) {
 if (!_g._orcaStreamedUuids)     _g._orcaStreamedUuids     = new Set<string>();
 const runningDispatches = _g._orcaRunningDispatches;
 
-
-/**
- * Whether a PID is still running. Local copy of `heartbeat.ts`'s helper —
- * duplicated to avoid a circular import (heartbeat already imports
- * runClaudeDispatch from this file). Used by the adoption-mode exit waiter
- * in `runClaudeDispatch` to poll a detached child whose ChildProcess handle
- * was lost across a Node restart.
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Kill every process associated with a story.
@@ -162,6 +147,7 @@ const createStorySchema = z.object({
   status: z.enum(["icebox", "planning", "backlog"]).default("planning"),
   agent: z.string().optional(),
   parentStoryId: z.string().uuid().nullable().optional(),
+  prereqStoryIds: z.array(z.string().uuid()).optional(),
   labels: z.array(z.string()).optional(),
   priority: z.number().int().optional(),
 });
@@ -183,6 +169,8 @@ const updateStorySchema = z.object({
     ])
     .optional(),
   agent: z.string().nullable().optional(),
+  parentStoryId: z.string().uuid().nullable().optional(),
+  prereqStoryIds: z.array(z.string().uuid()).optional(),
   labels: z.array(z.string()).optional(),
   priority: z.number().int().optional(),
   blockedReason: z.string().nullable().optional(),
@@ -281,7 +269,42 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         sql`${schema.stories.status} IN ('implementing', 'qa', 'review', 'planning')`,
       )
       .groupBy(schema.stories.projectId, schema.stories.status);
-    return c.json({ counts: rows });
+
+    // Stories currently in `done` whose row was last touched since today's
+    // UTC midnight. `completedAt` exists in the schema but is never populated
+    // by any transition, so `updatedAt` is the proxy for "moved to done".
+    // UTC midnight (vs. server-local) keeps the figure aligned with the
+    // calendar-date the user sees regardless of server timezone.
+    const now = new Date();
+    const todayStart = new Date(Date.UTC(
+      now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+    ));
+    const doneRows = await db
+      .select({
+        projectId: schema.stories.projectId,
+        status: schema.stories.status,
+        count: sql<number>`cast(count(*) as int)`,
+      })
+      .from(schema.stories)
+      .where(
+        and(
+          eq(schema.stories.status, "done"),
+          sql`${schema.stories.updatedAt} >= ${todayStart.toISOString()}`,
+        ),
+      )
+      .groupBy(schema.stories.projectId, schema.stories.status);
+
+    // "agents working" = stories with a live dispatched agent process. Status
+    // alone (e.g. `implementing`) overcounts because the user can be hand-
+    // editing a story whose status hasn't transitioned yet; dispatchPid is
+    // the canonical mutex for "an agent is actively burning tokens here."
+    const [agentsRow] = await db
+      .select({ count: sql<number>`cast(count(*) as int)` })
+      .from(schema.stories)
+      .where(isNotNull(schema.stories.dispatchPid));
+    const agentsWorking = agentsRow?.count ?? 0;
+
+    return c.json({ counts: [...rows, ...doneRows], agentsWorking });
   });
 
   app.post("/", async (c) => {
@@ -300,6 +323,9 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         agent: body.agent ?? "spec-writer",
         ...(body.parentStoryId !== undefined
           ? { parentStoryId: body.parentStoryId }
+          : {}),
+        ...(body.prereqStoryIds !== undefined
+          ? { prereqStoryIds: body.prereqStoryIds }
           : {}),
         labels: body.labels ?? [],
         priority: body.priority ?? 0,
@@ -407,6 +433,122 @@ export function storiesRoutes(): Hono<OrcaEnv> {
     });
   });
 
+  // GET /api/stories/:id/hierarchy
+  //
+  // Returns the full hierarchy slice around this story so the UI
+  // Hierarchy tab can render the dependency graph in one round-trip:
+  //   - rootId: the topmost ancestor walked via parentStoryId
+  //   - nodes: every story in the subtree under rootId (ancestor chain +
+  //     all descendants), with id/title/status/agent/parentStoryId/
+  //     prereqStoryIds/projectId — enough to render the tree and the
+  //     prereq edges without follow-up calls
+  //
+  // Prereq IDs that point outside the subtree (rare, but legal) are
+  // returned in `outsideStories` with the same minimal shape, so the UI
+  // can label them too instead of showing a dead UUID.
+  app.get("/:id/hierarchy", async (c) => {
+    const id = c.req.param("id");
+    const db = c.get("db");
+
+    const [start] = await db
+      .select()
+      .from(schema.stories)
+      .where(eq(schema.stories.id, id));
+    if (!start) return c.json({ error: "story not found" }, 404);
+
+    // Walk up parentStoryId to the root, guarding against cycles and
+    // unbounded depth (the data model has no enforced acyclicity).
+    let rootId = start.id;
+    const ancestors = new Set<string>([start.id]);
+    let cursor: typeof start | null = start;
+    for (let i = 0; i < 50 && cursor?.parentStoryId; i += 1) {
+      if (ancestors.has(cursor.parentStoryId)) break;
+      ancestors.add(cursor.parentStoryId);
+      const [parent] = await db
+        .select()
+        .from(schema.stories)
+        .where(eq(schema.stories.id, cursor.parentStoryId));
+      if (!parent) break;
+      rootId = parent.id;
+      cursor = parent;
+    }
+
+    // Fetch every story in the same project, then BFS-collect everything
+    // reachable from rootId via parentStoryId edges. Project-scoping
+    // avoids a recursive CTE and keeps the query single-shot; orca
+    // projects never contain enough stories for this to matter.
+    const allInProject = await db
+      .select()
+      .from(schema.stories)
+      .where(eq(schema.stories.projectId, start.projectId));
+
+    const byId = new Map(allInProject.map((s) => [s.id, s]));
+    const childrenOf = new Map<string, string[]>();
+    for (const s of allInProject) {
+      if (s.parentStoryId) {
+        const list = childrenOf.get(s.parentStoryId) ?? [];
+        list.push(s.id);
+        childrenOf.set(s.parentStoryId, list);
+      }
+    }
+
+    const subtree = new Set<string>();
+    const queue = [rootId];
+    while (queue.length > 0) {
+      const next = queue.shift()!;
+      if (subtree.has(next)) continue;
+      subtree.add(next);
+      for (const childId of childrenOf.get(next) ?? []) queue.push(childId);
+    }
+
+    type Node = {
+      id: string;
+      title: string;
+      status: StoryStatus;
+      agent: string | null;
+      parentStoryId: string | null;
+      prereqStoryIds: string[];
+      projectId: string;
+    };
+    const toNode = (s: typeof start): Node => ({
+      id: s.id,
+      title: s.title,
+      status: s.status,
+      agent: s.agent,
+      parentStoryId: s.parentStoryId,
+      prereqStoryIds: s.prereqStoryIds ?? [],
+      projectId: s.projectId,
+    });
+
+    const nodes: Node[] = [];
+    const outsideIds = new Set<string>();
+    for (const sid of subtree) {
+      const s = byId.get(sid);
+      if (!s) continue;
+      nodes.push(toNode(s));
+      for (const pid of s.prereqStoryIds ?? []) {
+        if (!subtree.has(pid)) outsideIds.add(pid);
+      }
+    }
+
+    let outsideStories: Node[] = [];
+    if (outsideIds.size > 0) {
+      // Cross-project prereqs are legal; look them up separately.
+      const outsideRows = await db
+        .select()
+        .from(schema.stories)
+        .where(
+          sql`${schema.stories.id} IN (${sql.join(
+            [...outsideIds].map((oid) => sql`${oid}`),
+            sql`, `,
+          )})`,
+        );
+      outsideStories = outsideRows.map(toNode);
+    }
+
+    return c.json({ rootId, focusedId: start.id, nodes, outsideStories });
+  });
+
   // GET /api/stories/:id/cost
   //
   // Token-attribution breakdown for the story. Reads token_heatmaps
@@ -512,6 +654,8 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       ...(parsed.specMd !== undefined ? { specMd: parsed.specMd } : {}),
       ...(parsed.status !== undefined ? { status: parsed.status } : {}),
       ...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
+      ...(parsed.parentStoryId !== undefined ? { parentStoryId: parsed.parentStoryId } : {}),
+      ...(parsed.prereqStoryIds !== undefined ? { prereqStoryIds: parsed.prereqStoryIds } : {}),
       ...(parsed.labels !== undefined ? { labels: parsed.labels } : {}),
       ...(parsed.priority !== undefined ? { priority: parsed.priority } : {}),
       ...(parsed.blockedReason !== undefined ? { blockedReason: parsed.blockedReason } : {}),
@@ -584,6 +728,23 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         {
           error: "review_requires_qa",
           message: `Cannot transition status: review from ${current.status}. The review status is reserved for qa-tester sign-off — implementing agents must hand off to qa-tester (PATCH agent="qa-tester", status="qa") instead. If you genuinely believe this story needs no QA, leave it to the human reviewer.`,
+        },
+        400,
+      );
+    }
+
+    // ── Done-is-human-only gate ──────────────────────────────────────────
+    // `done` is the final human approval. Agents must never set it
+    // directly — backend/frontend hand off to qa-tester (status=qa),
+    // qa-tester hands off to a human (status=review), and only the human
+    // resolves to done. Without this gate, an implementing agent can
+    // shortcut the entire qa+review pipeline by PATCHing done — which
+    // is what happened on 0416289f. Users keep full manual control.
+    if (body.status === "done" && eventActor !== "user") {
+      return c.json(
+        {
+          error: "done_requires_human",
+          message: `Cannot transition status: done from ${current.status}. The done status is reserved for human approval — implementing agents must hand off to qa-tester (PATCH agent="qa-tester", status="qa") and qa-tester must hand off to the human reviewer (status="review"). Only the human resolves a story to done.`,
         },
         400,
       );
@@ -804,7 +965,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       .where(eq(schema.stories.id, id));
     if (!story) return c.json({ error: "story not found" }, 404);
 
-    if (story.status !== "implementing" && story.status !== "qa") {
+    if (story.dispatchPid == null) {
       return c.json({ ok: true, noop: true, status: story.status });
     }
 
@@ -1492,17 +1653,53 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   );
 
   const getChangedFiles = once(async () => {
-    // Use the story's firstBacklogAt (or createdAt as fallback) as the mtime
-    // anchor. This ensures the list reflects all files touched since this story
-    // began — across every dispatch — rather than only the most-recent dispatch
-    // window, which was causing the QA agent to see an unexpectedly broad or
-    // narrow set of files.
+    // Anchor at the most recent state_transition INTO the story's current
+    // status. The result is the files touched in *this* leg of the story,
+    // not every file the story has touched since first hitting backlog.
+    //
+    // Why this matters for token usage: `{files.list}` is variable content
+    // in the rendered prompt, so every byte we ship lands in cache_creation
+    // on turn 1 and cache_read on every subsequent turn. The old
+    // firstBacklogAt anchor grew unboundedly across QA retries (each retry
+    // saw the same list plus a few new files), and that list rode along as
+    // cache_read for every turn of every subsequent dispatch. Anchoring at
+    // the most recent transition means QA only sees what the do-er touched
+    // since the most recent hand-off — typically a handful of files.
+    //
+    // Fallback chain: most-recent matching transition → firstBacklogAt →
+    // createdAt → epoch. The fallbacks keep the previous behavior for
+    // freshly-created stories that haven't transitioned yet.
     const [storyMeta] = await db
-      .select({ firstBacklogAt: schema.stories.firstBacklogAt, createdAt: schema.stories.createdAt })
+      .select({
+        firstBacklogAt: schema.stories.firstBacklogAt,
+        createdAt: schema.stories.createdAt,
+        status: schema.stories.status,
+      })
       .from(schema.stories)
       .where(eq(schema.stories.id, storyId));
 
-    const anchor: Date = storyMeta?.firstBacklogAt ?? storyMeta?.createdAt ?? new Date(0);
+    let transitionAnchor: Date | null = null;
+    if (storyMeta?.status) {
+      const [evt] = await db
+        .select({ createdAt: schema.activityEvents.createdAt })
+        .from(schema.activityEvents)
+        .where(
+          and(
+            eq(schema.activityEvents.storyId, storyId),
+            eq(schema.activityEvents.kind, "state_transition"),
+            sql`(${schema.activityEvents.payload}->>'status') = ${storyMeta.status}`,
+          ),
+        )
+        .orderBy(desc(schema.activityEvents.createdAt))
+        .limit(1);
+      transitionAnchor = evt?.createdAt ?? null;
+    }
+
+    const anchor: Date =
+      transitionAnchor ??
+      storyMeta?.firstBacklogAt ??
+      storyMeta?.createdAt ??
+      new Date(0);
 
     // Write a temp file and stamp its mtime to `anchor` so `find -newer`
     // treats it as the cutoff. Using `join(tmpdir(), ...)` keeps the file
@@ -1588,11 +1785,77 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
       .join("\n\n");
   };
 
+  // Pre-resolve the only two slices of the activity feed any agent
+  // legitimately needs: human/agent comments (the channel for cross-
+  // dispatch feedback) and a compact QA verdict log. Inlining these
+  // into the prompt lets us stop telling agents to `curl /api/stories/:id`
+  // — that fetch returned every event in the table (agent_stream,
+  // agent_prompt, agent_log, heartbeat noise, …), which then landed in
+  // the agent's context as a many-KB tool_result and got cached as
+  // cache_read on every subsequent turn. The two resolvers below are
+  // small, lazy (only fire if a prompt references them), and bounded.
+  const getComments = once(async () => {
+    return db
+      .select({
+        id: schema.activityEvents.id,
+        actor: schema.activityEvents.actor,
+        payload: schema.activityEvents.payload,
+        createdAt: schema.activityEvents.createdAt,
+      })
+      .from(schema.activityEvents)
+      .where(
+        and(
+          eq(schema.activityEvents.storyId, storyId),
+          eq(schema.activityEvents.kind, "comment"),
+        ),
+      )
+      .orderBy(schema.activityEvents.createdAt);
+  });
+  const renderComments = async () => {
+    const rows = await getComments();
+    if (rows.length === 0) return "(no comments yet)";
+    return rows
+      .map((r) => {
+        const p = (r.payload as { body?: string }) ?? {};
+        const ts = r.createdAt.toISOString();
+        return `--- comment by ${r.actor} at ${ts} ---\n${p.body ?? ""}`;
+      })
+      .join("\n\n");
+  };
+  const renderQaHistory = async () => {
+    const rows = await db
+      .select({
+        payload: schema.activityEvents.payload,
+        createdAt: schema.activityEvents.createdAt,
+      })
+      .from(schema.activityEvents)
+      .where(
+        and(
+          eq(schema.activityEvents.storyId, storyId),
+          eq(schema.activityEvents.kind, "qa_completed"),
+        ),
+      )
+      .orderBy(schema.activityEvents.createdAt);
+    if (rows.length === 0) return "(no prior QA passes)";
+    return rows
+      .map((r, i) => {
+        const p = (r.payload as Record<string, unknown>) ?? {};
+        const pass = p.pass === true;
+        const items = Array.isArray(p.items) ? p.items.length : 0;
+        const failures = Array.isArray(p.failures) ? p.failures.length : 0;
+        const verdict = pass ? "PASS" : `FAIL (${failures} failure${failures === 1 ? "" : "s"})`;
+        return `Attempt ${i + 1} (${r.createdAt.toISOString()}): ${verdict} — ${items} items checked`;
+      })
+      .join("\n");
+  };
+
   const promptResolvers = {
     "story.title":      title,
     "story.spec":       specMd || "(no spec provided)",
     "story.refinement_answers": renderAnswers,
     "story.open_questions":     renderOpen,
+    "story.comments":           renderComments,
+    "story.qa_history":         renderQaHistory,
     "story.id":         storyId,
     "story.project_id": projectId,
     "story.agent":      storyAgent,
@@ -1823,6 +2086,13 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     const doerEnv: NodeJS.ProcessEnv = { ...process.env };
     if (doerModel) doerEnv.ANTHROPIC_MODEL = doerModel;
 
+    // Per-agent turn cap. Maps to `claude --max-turns N`. The agent's
+    // own row is the source of truth — story-level override would
+    // require its own column we don't currently have, and per-agent
+    // caps are the right level of granularity anyway (QA needs fewer
+    // turns than a do-er).
+    const maxTurns = await resolveMaxTurnsForAgent(db, storyAgent as import("@orca/shared").AgentName);
+
     // --output-format stream-json emits one JSON message per stdout line as
     // claude thinks/acts, so the activity feed updates in real time instead of
     // dumping everything at the end. --verbose is required by the CLI when
@@ -1847,6 +2117,10 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
       // and means rules like "rx" → resolve recipes/_index.md never reach
       // the agent.
       ...(systemPrompt && !existingSessionId ? ["--append-system-prompt", systemPrompt] : []),
+      // Per-agent turn cap. Forces tighter scope and bounds the
+      // accumulated tool-result context (the dominant per-dispatch
+      // cost). Null/unset = no cap.
+      ...(maxTurns != null ? ["--max-turns", String(maxTurns)] : []),
       "-p",
       effectivePrompt,
       "--dangerously-skip-permissions",

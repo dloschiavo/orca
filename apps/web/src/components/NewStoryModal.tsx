@@ -10,7 +10,7 @@ interface NewStoryModalProps {
 export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStoryModalProps) {
   const [title, setTitle] = useState("");
   const [specMd, setSpecMd] = useState("");
-  const [status, setStatus] = useState<"icebox" | "planning" | "backlog">("icebox");
+  const [status, setStatus] = useState<"icebox" | "planning" | "backlog">("planning");
   const [agent, setAgent] = useState("spec-writer");
 
   return (

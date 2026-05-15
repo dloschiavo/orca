@@ -4,13 +4,19 @@
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "goliath": {
+    "role": "backend",
+    "name": "server",
+    "canonicalPort": 4455,
+    "framework": "hono"
+  },
   "scripts": {
     "postinstall": "tsx src/scripts/setup-env.ts",
-    "predev": "tsx src/scripts/setup-env.ts && lsof -ti:4455 | xargs kill -9 2>/dev/null || true",
-    "dev": "vite-node --watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/scripts/setup-env.ts && node ../../scripts/service-ports.mjs -- vite-node --watch src/index.ts",
     "build": "tsc",
+    "start": "node ../../scripts/service-ports.mjs --start -- tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo",
     "seed:audit": "tsx src/scripts/seed-audit.ts",
     "codebase-index": "tsx src/scripts/codebase-index.ts"
   },

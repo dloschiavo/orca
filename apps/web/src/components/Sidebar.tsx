@@ -8,17 +8,8 @@ import {
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { useProjectContext } from "../state/ProjectContext.js";
 import { api } from "../api.js";
-import type { Story } from "@orca/shared";
+import type { Story, ServerStatus } from "@orca/shared";
 import { resolveAgentDisplay } from "../utils/agentStyle.js";
-
-// Project dot colors — cycled by index
-const PROJECT_COLORS = [
-  "oklch(0.78 0.16 145)",
-  "oklch(0.78 0.15 60)",
-  "oklch(0.78 0.14 250)",
-  "oklch(0.78 0.14 320)",
-  "oklch(0.78 0.10 200)",
-];
 
 export function Sidebar() {
   const navigate = useNavigate();
@@ -31,6 +22,17 @@ export function Sidebar() {
     queryFn: () => api.stories.counts(),
     refetchInterval: 5_000,
   });
+
+  // Per-project dev-server status (frontend + backend ports). Shared query key
+  // with PageHeader/ProjectsPage so React Query deduplicates the poll.
+  const { data: statusData } = useQuery({
+    queryKey: ["server-status"],
+    queryFn: () => api.projects.serverStatus(),
+    refetchInterval: 10_000,
+  });
+  const statusByProject = new Map<string, ServerStatus>(
+    (statusData?.statuses ?? []).map((s) => [s.projectId, s]),
+  );
 
   // All stories (for agent activity buckets)
   const { data: allStoriesData } = useQuery({
@@ -48,11 +50,16 @@ export function Sidebar() {
 
   const allStories = allStoriesData?.stories ?? [];
 
-  // Group active-agent stories by their assigned agent name
+  // Group active-agent stories by their assigned agent name. Match the topbar's
+  // definition of "agent working": a story with a live dispatched process
+  // (dispatchPid != null). Using status alone overcounts — a story can sit in
+  // `implementing`/`qa` after a crash or between heartbeat ticks with no live
+  // process, which is why the sidebar previously diverged from the topbar.
   const agentBuckets = new Map<string, Story[]>();
   for (const s of allStories) {
-    if (s.status !== "planning" && s.status !== "implementing" && s.status !== "qa") continue;
-    const name = s.agentOverride ?? s.agent ?? "(unknown)";
+    if (s.dispatchPid == null) continue;
+    const name = s.agentOverride ?? s.agent;
+    if (!name) continue;
     const bucket = agentBuckets.get(name) ?? [];
     bucket.push(s);
     agentBuckets.set(name, bucket);
@@ -69,6 +76,12 @@ export function Sidebar() {
     if (row.status === "qa") entry.qa += row.count;
     if (row.status === "review") entry.review += row.count;
     projectBadges.set(row.projectId, entry);
+  }
+
+  // A project pulses when any of its stories has a live dispatched process.
+  const projectsWithActiveAgent = new Set<string>();
+  for (const s of allStories) {
+    if (s.dispatchPid != null) projectsWithActiveAgent.add(s.projectId);
   }
 
   // Count stories waiting on the human (planning = spec-writer asking questions, review/blocked = needs your input)
@@ -93,20 +106,24 @@ export function Sidebar() {
           <span className="plus" title="Add project" onClick={() => navigate("/projects/add")}>+</span>
         </div>
         {isLoading && <div style={{ padding: "6px var(--pad-x)", color: "var(--fg-3)", fontSize: 11.5 }}>loading…</div>}
-        {projects.map((p, i) => {
+        {projects.map((p) => {
           const active = p.id === activeProjectId;
           const badges = projectBadges.get(p.id);
-          const hasActive = (badges?.implementing ?? 0) + (badges?.qa ?? 0) > 0;
-          const projectColor = PROJECT_COLORS[i % PROJECT_COLORS.length]!;
+          const hasActive = projectsWithActiveAgent.has(p.id);
+          const status = statusByProject.get(p.id);
           return (
             <div
               key={p.id}
               className={"sb-item" + (active ? " active" : "")}
               onClick={() => handleProjectClick(p.id)}
             >
-              <span className="sb-dot" style={{ background: projectColor }} />
+              <ProjectStatusPip status={status} />
               <span className="sb-name">{p.name}</span>
-              {hasActive && <span className="sb-active-pulse" title="agent active" />}
+              {hasActive && (
+                <span className="typing" style={{ color: "var(--attn-mid)" }} title="agent active">
+                  <i /><i /><i />
+                </span>
+              )}
               {badges && (badges.planning + badges.implementing + badges.qa + badges.review) > 0 && (
                 <span className="sb-count">
                   {badges.planning + badges.implementing + badges.qa + badges.review}
@@ -146,14 +163,6 @@ export function Sidebar() {
         <SbLink icon={faRobot} name="Agents" onClick={() => navigate("/agents")} />
         <SbLink icon={faBook}  name="Recipes" onClick={() => navigate("/recipes")} />
         <SbLink icon={faGear}  name="Settings" onClick={() => navigate("/settings")} />
-      </div>
-
-      <div style={{
-        borderTop: "1px solid var(--border-0)", padding: "8px var(--pad-x)",
-        fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)",
-        display: "flex", alignItems: "center",
-      }}>
-        <span style={{ marginLeft: "auto" }}>j ↕ · ⏎ open</span>
       </div>
     </aside>
   );
@@ -198,6 +207,54 @@ function AgentRow({ agentName, stories }: AgentRowProps) {
       </div>
       <span className="sb-agent-count">{stories.length}</span>
     </div>
+  );
+}
+
+// Tri-state service health:
+//   all   — every declared/discovered service is up (green, blinking)
+//   some  — at least one up but not all (yellow, blinking)
+//   none  — nothing up, or no services known (red, static)
+type ProjectHealth = "all" | "some" | "none";
+
+function projectHealth(status: ServerStatus | undefined): ProjectHealth {
+  if (!status || status.endpoints.length === 0) return "none";
+  const running = status.endpoints.filter((e) => e.running).length;
+  if (running === 0) return "none";
+  if (running === status.endpoints.length) return "all";
+  return "some";
+}
+
+function ProjectStatusPip({ status }: { status: ServerStatus | undefined }) {
+  const health = projectHealth(status);
+  const title = !status
+    ? "no server config"
+    : status.endpoints.length === 0
+      ? "no endpoints"
+      : status.endpoints
+          .map((e) => `${e.framework}:${e.port} ${e.running ? "up" : "down"}`)
+          .join(" · ");
+  // Tri-state palette: green (all), yellow (some), red (none). The yellow
+  // is inlined because the design system's `--attn-high` is an amber that
+  // reads as too close to the red `--attn-error` at 7px.
+  const background =
+    health === "all"
+      ? "var(--attn-done)"
+      : health === "some"
+        ? "oklch(0.88 0.18 100)"
+        : "var(--attn-error)";
+  return (
+    <span
+      title={title}
+      style={{
+        width: 7,
+        height: 7,
+        borderRadius: "50%",
+        background,
+        flexShrink: 0,
+        animation:
+          health === "none" ? "none" : "dot-blink 2.4s ease-in-out infinite",
+      }}
+    />
   );
 }
 

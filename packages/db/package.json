@@ -10,8 +10,9 @@
     "./schema": "./src/schema/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo",
     "push": "drizzle-kit push",
     "studio": "drizzle-kit studio",
     "generate": "drizzle-kit generate"

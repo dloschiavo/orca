@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import clsx from "clsx";
 import { api } from "../api.js";
 import { useProjectContext } from "../state/ProjectContext.js";
 import type { ServerStatus } from "@orca/shared";
@@ -9,11 +8,9 @@ import type { ServerStatus } from "@orca/shared";
 function heatColor(fraction: number): string {
   const f = Math.max(0, Math.min(1, fraction));
   if (f < 0.5) {
-    // green → yellow
     const r = Math.round(255 * (f / 0.5));
     return `rgb(${r}, 200, 60)`;
   }
-  // yellow → red
   const g = Math.round(200 * (1 - (f - 0.5) / 0.5));
   return `rgb(255, ${g}, 60)`;
 }
@@ -46,7 +43,6 @@ export function PageHeader({
     mutationFn: ({ id, kind }: { id: string; kind?: "frontend" | "backend" }) =>
       api.projects.start(id, kind),
     onSuccess: () => {
-      // Poll faster for a bit to pick up the newly started process
       setTimeout(
         () => queryClient.invalidateQueries({ queryKey: ["server-status"] }),
         3000,
@@ -62,7 +58,6 @@ export function PageHeader({
       ? rawUsage
       : null;
 
-  // Find status for the active project — prefer live status data over cached config
   const activeStatus: ServerStatus | undefined = activeProject
     ? statusData?.statuses?.find((s) => s.projectId === activeProject.id)
     : undefined;
@@ -70,7 +65,6 @@ export function PageHeader({
   const frontends = activeStatus?.endpoints.filter((e) => e.kind === "frontend") ?? [];
   const backends = activeStatus?.endpoints.filter((e) => e.kind === "backend") ?? [];
 
-  // Show indicators if we have live status data OR a cached config
   const hasConfig =
     (activeStatus?.endpoints?.length ?? 0) > 0 ||
     !!activeProject?.serverConfig?.endpoints?.length;
@@ -81,38 +75,27 @@ export function PageHeader({
   }
 
   return (
-    <header className="h-12 px-6 flex items-center justify-between border-b border-border bg-surface shrink-0 sticky top-0 z-40">
-      <div className="flex items-baseline gap-3 min-w-0">
-        <h1 className="text-sm font-semibold text-text truncate">{title}</h1>
-        {subtitle && (
-          <span className="text-xs text-muted truncate">{subtitle}</span>
-        )}
-      </div>
-      <div className="flex items-center gap-3">
-        {/* Server status indicators */}
+    <header className="adm-head">
+      <h1 className="adm-head-title">{title}</h1>
+      {subtitle && <span className="adm-head-sub">{subtitle}</span>}
+      <div className="adm-head-actions">
         {hasConfig && (
-          <div className="flex items-center gap-2 text-xs">
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             {frontends.map((ep) => (
-              <span key={`fe-${ep.port}`} className="flex items-center gap-1">
-                <span
-                  className={clsx(
-                    "inline-block w-2 h-2 rounded-full",
-                    ep.running ? "bg-done" : "bg-red-500",
-                  )}
-                />
+              <ServerPip key={`fe-${ep.port}`} running={ep.running}>
                 {ep.running ? (
                   <a
                     href={`http://localhost:${ep.port}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-blue-400 hover:underline"
+                    style={{ color: "var(--ag-impl)", textDecoration: "none" }}
                   >
                     localhost:{ep.port}
                   </a>
                 ) : (
                   <button
                     type="button"
-                    className="text-muted hover:text-text transition-colors"
+                    className="adm-pip-btn"
                     title="Click to start frontend"
                     onClick={() => handleStart("frontend")}
                     disabled={startMutation.isPending}
@@ -122,17 +105,16 @@ export function PageHeader({
                       : "localhost"}
                   </button>
                 )}
-              </span>
+              </ServerPip>
             ))}
             {frontends.length === 0 &&
               activeProject?.serverConfig?.endpoints
                 .filter((e) => e.kind === "frontend")
                 .map((ep) => (
-                  <span key={`fe-${ep.port}`} className="flex items-center gap-1">
-                    <span className="inline-block w-2 h-2 rounded-full bg-red-500" />
+                  <ServerPip key={`fe-${ep.port}`} running={false}>
                     <button
                       type="button"
-                      className="text-muted hover:text-text transition-colors"
+                      className="adm-pip-btn"
                       title="Click to start frontend"
                       onClick={() => handleStart("frontend")}
                       disabled={startMutation.isPending}
@@ -141,24 +123,16 @@ export function PageHeader({
                         ? "starting…"
                         : "localhost"}
                     </button>
-                  </span>
+                  </ServerPip>
                 ))}
             {backends.map((ep) => (
-              <span key={`be-${ep.port}`} className="flex items-center gap-1">
-                <span
-                  className={clsx(
-                    "inline-block w-2 h-2 rounded-full",
-                    ep.running ? "bg-done" : "bg-red-500",
-                  )}
-                />
+              <ServerPip key={`be-${ep.port}`} running={ep.running}>
                 {ep.running ? (
-                  <span className="text-muted">
-                    {ep.label ?? "backend"}
-                  </span>
+                  <span style={{ color: "var(--fg-2)" }}>{ep.label ?? "backend"}</span>
                 ) : (
                   <button
                     type="button"
-                    className="text-muted hover:text-text transition-colors"
+                    className="adm-pip-btn"
                     title="Click to start backend"
                     onClick={() => handleStart("backend")}
                     disabled={startMutation.isPending}
@@ -168,17 +142,16 @@ export function PageHeader({
                       : ep.label ?? "backend"}
                   </button>
                 )}
-              </span>
+              </ServerPip>
             ))}
             {backends.length === 0 &&
               activeProject?.serverConfig?.endpoints
                 .filter((e) => e.kind === "backend")
                 .map((ep) => (
-                  <span key={`be-${ep.port}`} className="flex items-center gap-1">
-                    <span className="inline-block w-2 h-2 rounded-full bg-red-500" />
+                  <ServerPip key={`be-${ep.port}`} running={false}>
                     <button
                       type="button"
-                      className="text-muted hover:text-text transition-colors"
+                      className="adm-pip-btn"
                       title="Click to start backend"
                       onClick={() => handleStart("backend")}
                       disabled={startMutation.isPending}
@@ -187,27 +160,36 @@ export function PageHeader({
                         ? "starting…"
                         : "backend"}
                     </button>
-                  </span>
+                  </ServerPip>
                 ))}
           </div>
         )}
         {usage != null && (
           <div
-            className="flex items-center gap-1.5"
+            style={{ display: "flex", alignItems: "center", gap: 6 }}
             title={`Weekly: ${Math.round(usage.fraction * 100)}% (as of ${new Date(usage.updatedAt).toLocaleTimeString()})`}
           >
-            <div className="w-24 h-2 rounded-full bg-border overflow-hidden">
+            <div
+              style={{
+                width: 88, height: 5, borderRadius: 4,
+                background: "var(--bg-3)", overflow: "hidden",
+                border: "1px solid var(--border-1)",
+              }}
+            >
               <div
-                className="h-full rounded-full transition-all duration-500"
                 style={{
+                  height: "100%",
                   width: `${Math.round(usage.fraction * 100)}%`,
                   backgroundColor: heatColor(usage.fraction),
+                  transition: "width 400ms ease",
                 }}
               />
             </div>
             <span
-              className="text-[10px] font-medium tabular-nums"
-              style={{ color: heatColor(usage.fraction) }}
+              style={{
+                fontFamily: "var(--mono)", fontSize: 10.5,
+                color: heatColor(usage.fraction), fontVariantNumeric: "tabular-nums",
+              }}
             >
               {Math.round(usage.fraction * 100)}%
             </span>
@@ -216,5 +198,26 @@ export function PageHeader({
         {actions}
       </div>
     </header>
+  );
+}
+
+function ServerPip({ running, children }: { running: boolean; children: ReactNode }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-2)",
+      }}
+    >
+      <span
+        style={{
+          width: 6, height: 6, borderRadius: "50%",
+          background: running ? "var(--attn-mid)" : "var(--attn-error)",
+          flexShrink: 0,
+          animation: running ? "dot-blink 2.4s ease-in-out infinite" : "none",
+        }}
+      />
+      {children}
+    </span>
   );
 }

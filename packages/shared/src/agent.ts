@@ -28,6 +28,7 @@ export interface Agent {
   isCodeModifying: boolean;
   model: string | null;
   fastModel: string | null;
+  maxTurns: number | null;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;

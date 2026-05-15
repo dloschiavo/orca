@@ -34,10 +34,20 @@ export function createApp(deps: AppDeps): Hono<OrcaEnv> {
   const app = new Hono<OrcaEnv>();
 
   app.use("*", logger());
+  const isProd = process.env.NODE_ENV === "production";
+  const devLocalhostOrigin = /^http:\/\/localhost:\d+$/;
+  const prodAllowed = (process.env.ORCA_CORS_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
   app.use(
     "*",
     cors({
-      origin: ["http://localhost:5173", "http://localhost:4455"],
+      origin: (origin) => {
+        if (!origin) return origin;
+        if (isProd) return prodAllowed.includes(origin) ? origin : null;
+        return devLocalhostOrigin.test(origin) ? origin : null;
+      },
       credentials: true,
     }),
   );

@@ -9,8 +9,9 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "clean": "rm -rf dist .turbo"
   },
   "dependencies": {
     "@orca/shared": "workspace:*"

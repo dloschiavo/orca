@@ -67,6 +67,24 @@ export function isHideableToolUse(
   return false;
 }
 
+/** Pull per-turn token count from an activity event payload. Returns 0 if N/A. */
+export function eventTurnTokens(e: ActivityEvent): number {
+  const p = (e.payload ?? {}) as Record<string, unknown>;
+  if (e.kind === "agent_stream") {
+    const type = p.type as string | undefined;
+    if (type === "assistant") {
+      const msg = p.message as Record<string, unknown> | undefined;
+      return sumUsageTokens(msg?.usage);
+    }
+    if (type === "result") return sumUsageTokens(p.usage);
+    return 0;
+  }
+  if (e.kind === "dispatch_completed") {
+    return typeof p.totalTokensUsed === "number" ? p.totalTokensUsed : 0;
+  }
+  return 0;
+}
+
 function sumUsageTokens(usage: unknown): number {
   if (!usage || typeof usage !== "object") return 0;
   const u = usage as Record<string, unknown>;

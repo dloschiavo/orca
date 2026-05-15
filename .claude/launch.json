@@ -3,15 +3,15 @@
   "configurations": [
     {
       "name": "orca-web",
-      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeExecutable": "pnpm",
       "runtimeArgs": [
-        "/Users/davidloschiavo/Documents/Goliath/orca/apps/web/node_modules/vite/bin/vite.js",
-        "--port",
-        "5174",
-        "--strictPort",
-        "/Users/davidloschiavo/Documents/Goliath/orca/apps/web"
+        "-C",
+        "/Users/davidloschiavo/Documents/Goliath/orca",
+        "--filter",
+        "@orca/web",
+        "dev"
       ],
-      "port": 5174
+      "port": 5173
     }
   ]
 }

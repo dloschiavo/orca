@@ -25,66 +25,70 @@ export function AgentsPage() {
   const selected = agents.find((a) => a.name === selectedAgent);
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="adm-page">
       <PageHeader
         title={<Breadcrumb first="Orca" second="Agents" />}
         subtitle={`${activeAgents.length} active${archivedAgents.length > 0 ? `, ${archivedAgents.length} archived` : ""}`}
       />
+
       {isLoading && (
-        <div className="p-6 text-sm text-muted">loading…</div>
+        <div className="adm-empty" style={{ padding: "22px var(--pad-x)", fontFamily: "var(--mono)" }}>
+          loading…
+        </div>
       )}
       {!isLoading && activeAgents.length === 0 && !showArchived && (
-        <div className="p-6 text-sm text-muted">
-          No agents in the database. The migrator should have seeded
-          the canonical list — check the server logs for migration errors.
+        <div className="adm-empty" style={{ padding: "22px var(--pad-x)" }}>
+          No agents in the database. The migrator should have seeded the
+          canonical list — check the server logs for migration errors.
         </div>
       )}
 
       {!isLoading && (
-        <div className="flex-1 min-h-0 flex">
-          <aside className="w-[260px] shrink-0 overflow-y-auto flex flex-col border-r border-border bg-surface">
-            <div className="px-3 py-2 flex items-center gap-2 shrink-0 border-b border-border">
+        <div className="adm-split">
+          <aside className="adm-split-aside">
+            <div className="adm-split-aside-head">
               <button
                 onClick={() => setShowCreateForm(true)}
-                className="btn btn-sm btn-primary flex-1"
+                className="btn btn-sm btn-primary"
+                style={{ flex: 1 }}
               >
                 + new agent
               </button>
               <button
                 onClick={() => setShowArchived((v) => !v)}
-                className={`btn btn-sm${showArchived ? " btn-active" : ""}`}
+                className={"btn btn-sm" + (showArchived ? " btn-active" : "")}
               >
                 archived
               </button>
             </div>
 
-            {activeAgents.map((a) => (
-              <AgentSidebarRow
-                key={a.id}
-                agent={a}
-                selected={selectedAgent === a.name}
-                onSelect={() => setSelectedAgent(a.name)}
-              />
-            ))}
+            <div className="adm-split-aside-scroll">
+              {activeAgents.map((a) => (
+                <AgentSidebarRow
+                  key={a.id}
+                  agent={a}
+                  selected={selectedAgent === a.name}
+                  onSelect={() => setSelectedAgent(a.name)}
+                />
+              ))}
 
-            {showArchived && archivedAgents.length > 0 && (
-              <>
-                <div className="px-4 py-1.5 text-[10px] uppercase tracking-wider text-muted bg-surface2 border-t border-b border-border">
-                  Archived
-                </div>
-                {archivedAgents.map((a) => (
-                  <AgentSidebarRow
-                    key={a.id}
-                    agent={a}
-                    selected={selectedAgent === a.name}
-                    onSelect={() => setSelectedAgent(a.name)}
-                  />
-                ))}
-              </>
-            )}
+              {showArchived && archivedAgents.length > 0 && (
+                <>
+                  <div className="adm-split-aside-section">Archived</div>
+                  {archivedAgents.map((a) => (
+                    <AgentSidebarRow
+                      key={a.id}
+                      agent={a}
+                      selected={selectedAgent === a.name}
+                      onSelect={() => setSelectedAgent(a.name)}
+                    />
+                  ))}
+                </>
+              )}
+            </div>
           </aside>
 
-          <div className="flex-1 min-w-0 overflow-y-auto">
+          <div className="adm-split-main">
             {showCreateForm ? (
               <CreateAgentForm
                 onClose={() => setShowCreateForm(false)}
@@ -94,7 +98,14 @@ export function AgentsPage() {
                 }}
               />
             ) : !selected ? (
-              <div className="flex items-center justify-center h-full text-sm font-mono text-muted/50">
+              <div
+                className="adm-empty"
+                style={{
+                  height: "100%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontFamily: "var(--mono)",
+                }}
+              >
                 select an agent
               </div>
             ) : (
@@ -121,33 +132,35 @@ function AgentSidebarRow({
   onSelect: () => void;
 }) {
   const { icon, color } = resolveAgentDisplay(agent.name);
+  const classes = [
+    "adm-listitem",
+    selected ? "active" : "",
+    agent.archivedAt ? "archived" : "",
+  ].filter(Boolean).join(" ");
   return (
     <button
       onClick={onSelect}
-      className={`w-full text-left px-4 py-3 transition-colors border-b border-border border-l-2 ${
-        selected ? "bg-surface2" : "hover:bg-surface2/50"
-      } ${agent.archivedAt ? "opacity-50" : ""}`}
+      className={classes}
       style={{ borderLeftColor: selected ? color : "transparent" }}
     >
-      <div className="flex items-center gap-2">
-        <FontAwesomeIcon icon={icon} className="text-[11px] shrink-0 w-3" style={{ color }} />
-        <span className="font-mono text-[12px] font-medium" style={{ color }}>
+      <div className="adm-listitem-head">
+        <FontAwesomeIcon
+          icon={icon}
+          style={{ color, fontSize: 11, width: 12, flexShrink: 0 }}
+        />
+        <span className="adm-listitem-name" style={{ color }}>
           {agent.name}
         </span>
         {!agent.isCodeModifying && (
-          <span className="text-[9px] uppercase text-muted/50">read-only</span>
+          <span className="adm-listitem-aux">read-only</span>
         )}
         {agent.archivedAt && (
-          <span className="text-[9px] uppercase text-muted/50">archived</span>
+          <span className="adm-listitem-aux">archived</span>
         )}
       </div>
-      <div className="text-[11px] mt-1 pl-8 whitespace-normal text-muted">
-        {agent.description}
-      </div>
+      <div className="adm-listitem-desc">{agent.description}</div>
       {agent.model && (
-        <div className="text-[10px] font-mono mt-0.5 pl-8 text-muted/50">
-          {agent.model}
-        </div>
+        <div className="adm-listitem-meta">{agent.model}</div>
       )}
     </button>
   );
@@ -176,71 +189,87 @@ function CreateAgentForm({
   const nameValid = /^[a-z0-9-]+$/.test(name);
 
   return (
-    <div className="p-6 space-y-6 max-w-lg">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-text">New Agent</h2>
-        <button onClick={onClose} className="btn btn-sm btn-ghost">cancel</button>
-      </div>
-
-      <div>
-        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
-          Name <span className="normal-case tracking-normal text-muted/50">(lowercase, hyphens only)</span>
-        </label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. my-agent"
-          className={`w-full px-3 py-2 rounded-md text-sm font-mono outline-none bg-surface text-text border ${
-            name && !nameValid ? "border-blocked" : "border-border"
-          }`}
-        />
-        {name && !nameValid && (
-          <div className="text-[11px] mt-1 text-blocked">
-            Only lowercase letters, numbers, and hyphens allowed.
-          </div>
-        )}
-      </div>
-
-      <div>
-        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
-          Description
-        </label>
-        <input
-          type="text"
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="One-line description of what this agent does"
-          className="w-full px-3 py-2 rounded-md text-sm outline-none bg-surface text-text border border-border"
-        />
-      </div>
-
-      <div className="flex items-center gap-3">
-        <input
-          type="checkbox"
-          id="isCodeModifying"
-          checked={isCodeModifying}
-          onChange={(e) => setIsCodeModifying(e.target.checked)}
-          className="rounded"
-        />
-        <label htmlFor="isCodeModifying" className="text-sm cursor-pointer text-text/80">
-          Code-modifying agent
-        </label>
-      </div>
-
-      {createMutation.isError && (
-        <div className="text-[12px] rounded-md px-3 py-2 text-blocked bg-blocked/10 border border-blocked/30">
-          {(createMutation.error as Error)?.message ?? "Failed to create agent"}
+    <div className="adm-body adm-body-narrow">
+      <section>
+        <div className="adm-section">
+          <span>New agent</span>
+          <span className="adm-section-rule" />
+          <button onClick={onClose} className="btn btn-sm btn-ghost">cancel</button>
         </div>
-      )}
 
-      <button
-        onClick={() => createMutation.mutate()}
-        disabled={!name || !nameValid || createMutation.isPending}
-        className="btn btn-sm btn-primary"
-      >
-        {createMutation.isPending ? "creating…" : "create agent"}
-      </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <label className="adm-label">
+              Name
+              <span className="adm-label-aux">(lowercase, hyphens only)</span>
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. my-agent"
+              className="input"
+              style={{
+                fontFamily: "var(--mono)",
+                borderColor: name && !nameValid ? "var(--attn-error)" : undefined,
+              }}
+            />
+            {name && !nameValid && (
+              <div style={{ fontSize: 11, color: "var(--attn-error)", marginTop: 4 }}>
+                Only lowercase letters, numbers, and hyphens allowed.
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="adm-label">Description</label>
+            <input
+              type="text"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="One-line description of what this agent does"
+              className="input"
+            />
+          </div>
+
+          <label
+            style={{
+              display: "flex", alignItems: "center", gap: 8,
+              fontSize: 12.5, color: "var(--fg-1)", cursor: "default",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={isCodeModifying}
+              onChange={(e) => setIsCodeModifying(e.target.checked)}
+              style={{ accentColor: "var(--ag-impl)" }}
+            />
+            Code-modifying agent
+          </label>
+
+          {createMutation.isError && (
+            <div
+              className="adm-tag adm-tag-error"
+              style={{
+                padding: "8px 10px", fontSize: 12, fontFamily: "inherit",
+                whiteSpace: "normal",
+              }}
+            >
+              {(createMutation.error as Error)?.message ?? "Failed to create agent"}
+            </div>
+          )}
+
+          <div>
+            <button
+              onClick={() => createMutation.mutate()}
+              disabled={!name || !nameValid || createMutation.isPending}
+              className="btn btn-sm btn-primary"
+            >
+              {createMutation.isPending ? "creating…" : "create agent"}
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -273,9 +302,8 @@ function ModelSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className={`w-full px-3 py-2 rounded-md text-sm font-mono outline-none bg-surface text-text border ${
-        dirty ? "border-done/50 ring-1 ring-done/20" : "border-border"
-      }`}
+      className={"input" + (dirty ? " adm-dirty" : "")}
+      style={{ fontFamily: "var(--mono)" }}
     >
       <option value="">{defaultLabel}</option>
       {models.map((m) => (
@@ -283,9 +311,7 @@ function ModelSelect({
           {m.id}
         </option>
       ))}
-      {hasUnknown && (
-        <option value={value}>{value} (unknown)</option>
-      )}
+      {hasUnknown && <option value={value}>{value} (unknown)</option>}
     </select>
   );
 }
@@ -296,6 +322,9 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
   const [descDraft, setDescDraft] = useState(agent.description);
   const [modelDraft, setModelDraft] = useState(agent.model ?? "");
   const [fastModelDraft, setFastModelDraft] = useState(agent.fastModel ?? "");
+  const [maxTurnsDraft, setMaxTurnsDraft] = useState<string>(
+    agent.maxTurns != null ? String(agent.maxTurns) : "",
+  );
 
   const { data: promptData } = useQuery({
     queryKey: ["agent-prompt", agentName],
@@ -310,21 +339,27 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
   const effectiveSystemDraft = systemDraft ?? fileSystem;
   const effectiveMainDraft = mainDraft ?? fileMain;
 
+  const maxTurnsCurrent = agent.maxTurns != null ? String(agent.maxTurns) : "";
   const isDirty = useMemo(() => {
     const descChanged = descDraft !== agent.description;
     const modelChanged = modelDraft !== (agent.model ?? "");
     const fastModelChanged = fastModelDraft !== (agent.fastModel ?? "");
+    const maxTurnsChanged = maxTurnsDraft !== maxTurnsCurrent;
     const systemChanged = effectiveSystemDraft !== fileSystem;
     const mainChanged = effectiveMainDraft !== fileMain;
-    return descChanged || modelChanged || fastModelChanged || systemChanged || mainChanged;
-  }, [descDraft, modelDraft, fastModelDraft, effectiveSystemDraft, effectiveMainDraft, agent, fileSystem, fileMain]);
+    return descChanged || modelChanged || fastModelChanged || maxTurnsChanged || systemChanged || mainChanged;
+  }, [descDraft, modelDraft, fastModelDraft, maxTurnsDraft, maxTurnsCurrent, effectiveSystemDraft, effectiveMainDraft, agent, fileSystem, fileMain]);
 
   const saveMutation = useMutation({
     mutationFn: async () => {
+      const maxTurnsTrim = maxTurnsDraft.trim();
+      const maxTurnsValue =
+        maxTurnsTrim === "" ? null : Math.max(1, Math.floor(Number(maxTurnsTrim) || 0));
       await api.agents.patch(agentName, {
         description: descDraft,
         model: modelDraft.trim() || null,
         fastModel: fastModelDraft.trim() || null,
+        maxTurns: maxTurnsValue,
       });
       const systemChanged = effectiveSystemDraft !== fileSystem;
       const mainChanged = effectiveMainDraft !== fileMain;
@@ -354,139 +389,162 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
   });
 
   const isArchived = agent.archivedAt !== null;
-
-  const fieldClass = (dirty: boolean) =>
-    dirty ? "border-done/50 ring-1 ring-done/20" : "border-border";
+  const { icon, color } = resolveAgentDisplay(agentName);
 
   return (
-    <div className="p-6 space-y-6 max-w-3xl">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          {(() => {
-            const { icon, color } = resolveAgentDisplay(agentName);
-            return (
-              <FontAwesomeIcon icon={icon} className="text-xl shrink-0" style={{ color }} />
-            );
-          })()}
-          <div>
-            <h2 className="text-sm font-semibold font-mono" style={{ color: resolveAgentDisplay(agentName).color }}>
-              {agentName}
-            </h2>
-            <div className="text-[11px] mt-0.5 text-muted">
-              v{agent.version}
-              {agent.isCodeModifying ? " · code-modifying" : " · read-only"}
-              {isArchived && <span className="text-blocked"> · archived</span>}
+    <div className="adm-body" style={{ maxWidth: 900 }}>
+      <section>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <FontAwesomeIcon icon={icon} style={{ color, fontSize: 22, flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+              <h2
+                style={{
+                  fontFamily: "var(--mono)", fontSize: 15, fontWeight: 600,
+                  color, margin: 0,
+                }}
+              >
+                {agentName}
+              </h2>
+              <span className="adm-listitem-meta" style={{ margin: 0 }}>
+                v{agent.version}
+                {agent.isCodeModifying ? " · code-modifying" : " · read-only"}
+                {isArchived && (
+                  <span style={{ color: "var(--attn-error)" }}> · archived</span>
+                )}
+              </span>
             </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {isArchived ? (
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {isArchived ? (
+              <button
+                onClick={() => unarchiveMutation.mutate()}
+                disabled={unarchiveMutation.isPending}
+                className="btn btn-sm"
+              >
+                {unarchiveMutation.isPending ? "restoring…" : "unarchive"}
+              </button>
+            ) : (
+              <button
+                onClick={() => archiveMutation.mutate()}
+                disabled={archiveMutation.isPending}
+                className="btn btn-sm btn-danger"
+              >
+                {archiveMutation.isPending ? "archiving…" : "archive"}
+              </button>
+            )}
             <button
-              onClick={() => unarchiveMutation.mutate()}
-              disabled={unarchiveMutation.isPending}
-              className="btn btn-sm"
+              onClick={() => saveMutation.mutate()}
+              disabled={!isDirty || saveMutation.isPending}
+              className="btn btn-sm btn-primary"
             >
-              {unarchiveMutation.isPending ? "restoring…" : "unarchive"}
+              {saveMutation.isPending ? "saving…" : "save"}
             </button>
-          ) : (
-            <button
-              onClick={() => archiveMutation.mutate()}
-              disabled={archiveMutation.isPending}
-              className="btn btn-sm btn-danger"
-            >
-              {archiveMutation.isPending ? "archiving…" : "archive"}
-            </button>
-          )}
-          <button
-            onClick={() => saveMutation.mutate()}
-            disabled={!isDirty || saveMutation.isPending}
-            className="btn btn-sm btn-primary"
-          >
-            {saveMutation.isPending ? "saving…" : "save"}
-          </button>
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div>
-        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
-          Description
-        </label>
+      <section>
+        <label className="adm-label">Description</label>
         <input
           type="text"
           value={descDraft}
           onChange={(e) => setDescDraft(e.target.value)}
-          className={`w-full px-3 py-2 rounded-md text-sm outline-none bg-surface text-text border ${fieldClass(descDraft !== agent.description)}`}
+          className={"input" + (descDraft !== agent.description ? " adm-dirty" : "")}
         />
-      </div>
+      </section>
 
-      <div className="flex gap-4">
-        <div className="flex-1">
-          <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
-            Model
-          </label>
-          <ModelSelect
-            value={modelDraft}
-            onChange={setModelDraft}
-            defaultLabel="(default)"
-            dirty={modelDraft !== (agent.model ?? "")}
-          />
+      <section>
+        <div className="adm-grid-2">
+          <div>
+            <label className="adm-label">Model</label>
+            <ModelSelect
+              value={modelDraft}
+              onChange={setModelDraft}
+              defaultLabel="(default)"
+              dirty={modelDraft !== (agent.model ?? "")}
+            />
+          </div>
+          <div>
+            <label className="adm-label">Fast model</label>
+            <ModelSelect
+              value={fastModelDraft}
+              onChange={setFastModelDraft}
+              defaultLabel="(none)"
+              dirty={fastModelDraft !== (agent.fastModel ?? "")}
+            />
+          </div>
         </div>
-        <div className="flex-1">
-          <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
-            Fast Model
-          </label>
-          <ModelSelect
-            value={fastModelDraft}
-            onChange={setFastModelDraft}
-            defaultLabel="(none)"
-            dirty={fastModelDraft !== (agent.fastModel ?? "")}
-          />
-        </div>
-      </div>
+      </section>
 
-      <div>
-        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
-          Cached System Prompt
-          <span className="ml-2 normal-case tracking-normal text-muted/50">
+      <section>
+        <label className="adm-label">
+          Max turns
+          <span className="adm-label-aux">
+            (caps `--max-turns`; blank = no cap. Lower = less context accumulation per dispatch.)
+          </span>
+        </label>
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={maxTurnsDraft}
+          onChange={(e) => setMaxTurnsDraft(e.target.value)}
+          placeholder="(no cap)"
+          className={"input" + (maxTurnsDraft !== maxTurnsCurrent ? " adm-dirty" : "")}
+          style={{ fontFamily: "var(--mono)", maxWidth: 160 }}
+        />
+      </section>
+
+      <section>
+        <label className="adm-label">
+          Cached system prompt
+          <span className="adm-label-aux">
             ({effectiveSystemDraft.length.toLocaleString()} chars · cached)
           </span>
         </label>
         {!promptData ? (
-          <div className="text-[12px] text-muted">loading…</div>
+          <div className="adm-empty" style={{ fontFamily: "var(--mono)" }}>loading…</div>
         ) : (
           <textarea
             value={effectiveSystemDraft}
             onChange={(e) => setSystemDraft(e.target.value)}
             placeholder="Agent instructions, directives, static context… Cached by Claude across all stories using this agent."
-            className={`w-full min-h-[200px] px-3 py-2 rounded-md text-[12px] font-mono resize-y leading-relaxed outline-none bg-surface text-text border ${fieldClass(effectiveSystemDraft !== fileSystem)}`}
+            className={"adm-textarea" + (effectiveSystemDraft !== fileSystem ? " adm-dirty" : "")}
+            style={{ minHeight: 200 }}
           />
         )}
-      </div>
+      </section>
 
-      <div>
-        <label className="text-[10.5px] uppercase tracking-wider text-muted block mb-1.5">
-          Uncached Prompt
-          <span className="ml-2 normal-case tracking-normal text-muted/50">
+      <section>
+        <label className="adm-label">
+          Uncached prompt
+          <span className="adm-label-aux">
             ({effectiveMainDraft.length.toLocaleString()} chars)
           </span>
         </label>
         {!promptData ? (
-          <div className="text-[12px] text-muted">loading…</div>
+          <div className="adm-empty" style={{ fontFamily: "var(--mono)" }}>loading…</div>
         ) : (
           <textarea
             value={effectiveMainDraft}
             onChange={(e) => setMainDraft(e.target.value)}
             placeholder="Story-specific context: {story.title}, {story.spec}, {story.id}…"
-            className={`w-full min-h-[300px] px-3 py-2 rounded-md text-[12px] font-mono resize-y leading-relaxed outline-none bg-surface text-text border ${fieldClass(effectiveMainDraft !== fileMain)}`}
+            className={"adm-textarea" + (effectiveMainDraft !== fileMain ? " adm-dirty" : "")}
+            style={{ minHeight: 300 }}
           />
         )}
-      </div>
+      </section>
 
-      <div className="text-[10px] font-mono text-muted/50">
-        File: prompts/{agentName}.md · saves write the file directly · git owns history
-      </div>
+      <section>
+        <div className="adm-listitem-meta">
+          File: prompts/{agentName}.md · saves write the file directly · git owns history
+        </div>
+      </section>
 
-      <InvocationLog agentName={agentName} />
+      <section>
+        <InvocationLog agentName={agentName} />
+      </section>
     </div>
   );
 }
@@ -510,18 +568,28 @@ function InvocationLog({ agentName }: { agentName: string }) {
 
   return (
     <div>
-      <div className="text-[10.5px] uppercase tracking-wider mb-3 text-muted">
-        Invocation log ({invocations.length})
+      <div className="adm-section">
+        <span>Invocation log</span>
+        <span className="adm-section-rule" />
+        <span className="adm-head-sub">{invocations.length}</span>
       </div>
+
       {isLoading && (
-        <div className="text-[12px] text-muted">loading…</div>
+        <div className="adm-empty" style={{ fontFamily: "var(--mono)" }}>loading…</div>
       )}
       {!isLoading && invocations.length === 0 && (
-        <div className="text-sm py-6 text-center rounded-md text-muted border border-dashed border-border">
+        <div
+          className="adm-empty"
+          style={{
+            padding: 18, textAlign: "center", fontFamily: "var(--mono)",
+            border: "1px dashed var(--border-1)", borderRadius: "var(--r-md)",
+          }}
+        >
           No invocations recorded yet.
         </div>
       )}
-      <div className="space-y-2">
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {invocations.map((inv) => (
           <InvocationRow
             key={inv.id}
@@ -570,132 +638,251 @@ function InvocationRow({
   }, [menuOpen]);
 
   const resultClass = (r: string) => {
-    if (r === "pass" || r === "clear" || r === "ok") return "bg-done/20 text-done";
-    if (r === "fail" || r === "error" || r === "spawn_error") return "bg-blocked/20 text-blocked";
-    return "bg-surface2 text-muted";
+    if (r === "pass" || r === "clear" || r === "ok") return "adm-tag adm-tag-done";
+    if (r === "fail" || r === "error" || r === "spawn_error") return "adm-tag adm-tag-error";
+    return "adm-tag";
   };
-
-  const actions = (
-    <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-      <div className="relative" ref={menuRef}>
-        <button
-          onClick={() => setMenuOpen((v) => !v)}
-          className="w-6 h-6 flex items-center justify-center rounded transition-colors text-[15px] leading-none text-muted hover:text-text"
-          title="Actions"
-        >
-          ⋮
-        </button>
-        {menuOpen && (
-          <div className="absolute right-0 top-full z-50 mt-1 rounded-md shadow-lg min-w-[120px] py-1 bg-surface2 border border-border">
-            <button
-              onClick={() => { onCancel(); setMenuOpen(false); }}
-              className="w-full text-left px-3 py-1.5 text-[12px] transition-colors text-blocked hover:bg-surface"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-      </div>
-      {expanded && (
-        <button
-          onClick={onToggle}
-          title="Collapse"
-          className="w-6 h-6 flex items-center justify-center rounded transition-colors text-[14px]"
-          style={{ color: "var(--ag-impl)" }}
-        >
-          ✓
-        </button>
-      )}
-    </div>
-  );
 
   const headerInner = (
     <>
       {!expanded && (
-        <span className="text-[10px] text-muted/50">▶</span>
+        <span style={{ color: "var(--fg-4)", fontSize: 10 }}>▶</span>
       )}
-      <span className="text-[10px] font-mono text-muted/50">{inv.id.slice(0, 8)}</span>
-      <span className="text-[11px] font-mono text-muted">
+      <span
+        style={{
+          fontFamily: "var(--mono)", fontSize: 10, color: "var(--fg-4)",
+        }}
+      >
+        {inv.id.slice(0, 8)}
+      </span>
+      <span
+        style={{
+          fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-2)",
+        }}
+      >
         {ts.toLocaleDateString()} {ts.toLocaleTimeString()}
       </span>
       <a
         href={`/stories/${inv.storyId}`}
         onClick={(e) => e.stopPropagation()}
-        className="text-[11px] font-mono hover:underline"
-        style={{ color: "var(--ag-impl)" }}
+        style={{
+          fontFamily: "var(--mono)", fontSize: 11,
+          color: "var(--ag-impl)", textDecoration: "none",
+        }}
       >
         {inv.storyId.slice(0, 8)}
       </a>
-      {result && (
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${resultClass(result)}`}>
-          {result}
-        </span>
-      )}
+      {result && <span className={resultClass(result)}>{result}</span>}
       {isTimedOut && !result && (
-        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blocked/20 text-blocked">
-          timed out
-        </span>
+        <span className="adm-tag adm-tag-error">timed out</span>
       )}
-      <div className="ml-auto flex items-center gap-2 shrink-0">
+      <div
+        style={{
+          marginLeft: "auto", display: "flex", alignItems: "center",
+          gap: 8, flexShrink: 0,
+        }}
+      >
         {elapsed !== null && (
-          <span className="text-[10px] font-mono text-muted">{elapsed}s</span>
+          <span
+            style={{
+              fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-2)",
+            }}
+          >
+            {elapsed}s
+          </span>
         )}
         {!hasResponse && !isTimedOut && (
-          <span className="text-[10px] italic text-muted/50">pending…</span>
+          <span
+            style={{ fontSize: 10.5, fontStyle: "italic", color: "var(--fg-3)" }}
+          >
+            pending…
+          </span>
         )}
-        {actions}
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div ref={menuRef} style={{ position: "relative" }}>
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              title="Actions"
+              style={{
+                width: 22, height: 22, display: "flex",
+                alignItems: "center", justifyContent: "center",
+                borderRadius: "var(--r-sm)",
+                fontSize: 15, lineHeight: 1, color: "var(--fg-3)",
+                background: "transparent", border: 0, cursor: "default",
+              }}
+            >
+              ⋮
+            </button>
+            {menuOpen && (
+              <div
+                style={{
+                  position: "absolute", right: 0, top: "100%", marginTop: 4,
+                  zIndex: 50, minWidth: 120,
+                  background: "var(--bg-2)", border: "1px solid var(--border-1)",
+                  borderRadius: "var(--r-md)", boxShadow: "0 8px 24px rgba(0,0,0,.45)",
+                  padding: "4px 0",
+                }}
+              >
+                <button
+                  onClick={() => { onCancel(); setMenuOpen(false); }}
+                  style={{
+                    display: "flex", width: "100%", padding: "6px 12px",
+                    background: "transparent", border: 0, textAlign: "left",
+                    color: "var(--attn-error)", fontSize: 12.5, cursor: "default",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+          {expanded && (
+            <button
+              onClick={onToggle}
+              title="Collapse"
+              style={{
+                width: 22, height: 22, display: "flex",
+                alignItems: "center", justifyContent: "center",
+                background: "transparent", border: 0, cursor: "default",
+                color: "var(--ag-impl)", fontSize: 14,
+              }}
+            >
+              ✓
+            </button>
+          )}
+        </div>
       </div>
     </>
   );
 
   return (
-    <div className="rounded-md overflow-hidden border border-border">
+    <div
+      style={{
+        borderRadius: "var(--r-md)", overflow: "hidden",
+        border: "1px solid var(--border-1)",
+        background: "var(--bg-1)",
+      }}
+    >
       {expanded ? (
-        <div className="px-4 py-2.5 flex items-center gap-3 bg-surface">
+        <div
+          style={{
+            padding: "8px 12px", display: "flex", alignItems: "center", gap: 10,
+            background: "var(--bg-2)",
+          }}
+        >
           {headerInner}
         </div>
       ) : (
-        <button
+        <div
+          role="button"
+          tabIndex={0}
           onClick={onToggle}
-          className="w-full text-left px-4 py-2.5 flex items-center gap-3 transition-colors bg-surface hover:bg-surface2"
+          style={{
+            width: "100%", padding: "8px 12px",
+            display: "flex", alignItems: "center", gap: 10,
+            background: "var(--bg-1)", cursor: "default",
+            color: "var(--fg-1)",
+          }}
         >
           {headerInner}
-        </button>
+        </div>
       )}
       {expanded && (
-        <div className="flex min-h-[200px] border-t border-border">
-          <div className="flex-1 flex flex-col min-w-0 border-r border-border">
-            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider bg-surface text-muted border-b border-border">
+        <div
+          style={{
+            display: "flex", minHeight: 200,
+            borderTop: "1px solid var(--border-0)",
+          }}
+        >
+          <div
+            style={{
+              flex: 1, display: "flex", flexDirection: "column", minWidth: 0,
+              borderRight: "1px solid var(--border-0)",
+            }}
+          >
+            <div
+              style={{
+                padding: "5px 12px", background: "var(--bg-2)",
+                color: "var(--fg-3)", fontSize: 10, textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                borderBottom: "1px solid var(--border-0)",
+              }}
+            >
               Request
             </div>
-            <div className="flex-1 overflow-auto max-h-[400px]">
+            <div style={{ flex: 1, overflow: "auto", maxHeight: 400 }}>
               {inv.systemPrompt && (
-                <div className="border-b border-border">
-                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider bg-surface text-muted/50">
+                <div style={{ borderBottom: "1px solid var(--border-0)" }}>
+                  <div
+                    style={{
+                      padding: "3px 12px", background: "var(--bg-2)",
+                      color: "var(--fg-4)", fontSize: 10,
+                      textTransform: "uppercase", letterSpacing: "0.06em",
+                    }}
+                  >
                     System prompt
                   </div>
-                  <pre className="px-3 py-2 text-[11px] font-mono whitespace-pre-wrap break-words text-muted">
+                  <pre
+                    style={{
+                      margin: 0, padding: "8px 12px",
+                      fontFamily: "var(--mono)", fontSize: 11.5,
+                      whiteSpace: "pre-wrap", wordBreak: "break-word",
+                      color: "var(--fg-2)",
+                    }}
+                  >
                     {inv.systemPrompt}
                   </pre>
                 </div>
               )}
               <div>
                 {inv.systemPrompt && (
-                  <div className="px-3 py-1 text-[10px] uppercase tracking-wider bg-surface text-muted/50">
+                  <div
+                    style={{
+                      padding: "3px 12px", background: "var(--bg-2)",
+                      color: "var(--fg-4)", fontSize: 10,
+                      textTransform: "uppercase", letterSpacing: "0.06em",
+                    }}
+                  >
                     Main prompt
                   </div>
                 )}
-                <pre className="px-3 py-2 text-[11px] font-mono whitespace-pre-wrap break-words text-text/80">
+                <pre
+                  style={{
+                    margin: 0, padding: "8px 12px",
+                    fontFamily: "var(--mono)", fontSize: 11.5,
+                    whiteSpace: "pre-wrap", wordBreak: "break-word",
+                    color: "var(--fg-1)",
+                  }}
+                >
                   {inv.prompt}
                 </pre>
               </div>
             </div>
           </div>
-          <div className="flex-1 flex flex-col min-w-0">
-            <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider bg-surface text-muted border-b border-border">
+          <div
+            style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}
+          >
+            <div
+              style={{
+                padding: "5px 12px", background: "var(--bg-2)",
+                color: "var(--fg-3)", fontSize: 10,
+                textTransform: "uppercase", letterSpacing: "0.06em",
+                borderBottom: "1px solid var(--border-0)",
+              }}
+            >
               Response
             </div>
-            <pre className="flex-1 p-3 text-[11px] font-mono whitespace-pre-wrap break-words overflow-auto max-h-[400px] text-text/80">
+            <pre
+              style={{
+                flex: 1, margin: 0, padding: 12,
+                fontFamily: "var(--mono)", fontSize: 11.5,
+                whiteSpace: "pre-wrap", wordBreak: "break-word",
+                overflow: "auto", maxHeight: 400, color: "var(--fg-1)",
+              }}
+            >
               {inv.response ? formatResponse(inv.response) : "(awaiting response)"}
             </pre>
           </div>

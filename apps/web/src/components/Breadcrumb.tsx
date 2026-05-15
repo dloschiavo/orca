@@ -1,9 +1,5 @@
 import type { ReactNode } from "react";
 
-/**
- * Consistent breadcrumb for PageHeader titles.
- * Usage: <Breadcrumb first="ProjectName" second="All Stories" />
- */
 export function Breadcrumb({
   first,
   second,
@@ -12,10 +8,18 @@ export function Breadcrumb({
   second: ReactNode;
 }) {
   return (
-    <span className="flex items-baseline gap-1.5 min-w-0">
-      <span className="text-muted font-normal">{first}</span>
-      <span className="text-muted font-normal">›</span>
-      <span className="text-text">{second}</span>
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "baseline",
+        gap: 6,
+        minWidth: 0,
+        fontWeight: 400,
+      }}
+    >
+      <span style={{ color: "var(--fg-2)" }}>{first}</span>
+      <span style={{ color: "var(--fg-4)" }}>›</span>
+      <span style={{ color: "var(--fg-0)", fontWeight: 600 }}>{second}</span>
     </span>
   );
 }

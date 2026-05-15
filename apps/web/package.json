@@ -3,12 +3,22 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "goliath": {
+    "role": "frontend",
+    "name": "web",
+    "canonicalPort": 5173,
+    "framework": "vite",
+    "consumes": {
+      "name": "server",
+      "envVar": "ORCA_SERVER_URL"
+    }
+  },
   "scripts": {
-    "predev": "lsof -ti:5173 | xargs kill -9 2>/dev/null || true; rm -rf node_modules/.vite",
-    "dev": "vite",
+    "dev": "node ../../scripts/service-ports.mjs -- vite --port {PORT} --strictPort",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --port 5173",
-    "typecheck": "tsc --noEmit"
+    "start": "node ../../scripts/service-ports.mjs --start -- vite preview --port {PORT} --host",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist node_modules/.vite"
   },
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "^7.2.0",

@@ -11,23 +11,27 @@ export function ProjectsPage() {
 
   if (!activeProject) {
     return (
-      <div className="h-full flex items-center justify-center text-muted text-sm">
-        {activeProjectId ? "Loading…" : "No project selected"}
+      <div className="adm-page">
+        <div
+          className="adm-empty"
+          style={{
+            margin: "auto", padding: 40, textAlign: "center",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          {activeProjectId ? "Loading…" : "No project selected"}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="adm-page">
       <PageHeader
         title={<Breadcrumb first={activeProject.name} second="Project Settings" />}
       />
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        <ProjectDetail
-          key={activeProject.id}
-          project={activeProject}
-          onRemoved={() => {}}
-        />
+      <div className="adm-body" style={{ maxWidth: 960 }}>
+        <ProjectDetail key={activeProject.id} project={activeProject} onRemoved={() => {}} />
       </div>
     </div>
   );
@@ -46,7 +50,6 @@ function ProjectDetail({
   const [instructionsDraft, setInstructionsDraft] = useState<string>("");
   const instructionsInitialized = useRef(false);
 
-  // Rider file — load once, then track edits locally
   const { data: riderData, refetch: refetchRider } = useQuery({
     queryKey: ["project-rider", project.id],
     queryFn: () => api.projects.getRiderPreview(project.id),
@@ -61,28 +64,20 @@ function ProjectDetail({
 
   const riderPath = riderData?.path ?? `${project.repoPath}/CLAUDE.md`;
   const nameChanged = nameDraft !== project.name;
-  const instructionsChanged = instructionsInitialized.current &&
+  const instructionsChanged =
+    instructionsInitialized.current &&
     instructionsDraft !== (riderData?.content ?? "");
   const isDirty = nameChanged || instructionsChanged;
-
-  const fieldClass = (dirty: boolean) =>
-    dirty
-      ? "bg-surface border-done/50 ring-1 ring-done/20"
-      : "bg-surface border-border";
 
   const saveNameMut = useMutation({
     mutationFn: () =>
       api.projects.patch(project.id, { name: nameDraft.trim() || project.name }),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["projects"] });
-    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["projects"] }); },
   });
 
   const saveRiderMut = useMutation({
     mutationFn: () => api.projects.saveRider(project.id, instructionsDraft),
-    onSuccess: () => {
-      void refetchRider();
-    },
+    onSuccess: () => { void refetchRider(); },
   });
 
   async function handleSave() {
@@ -115,9 +110,7 @@ function ProjectDetail({
   const startMut = useMutation({
     mutationFn: (kind?: "frontend" | "backend") =>
       api.projects.start(project.id, kind),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["server-status"] });
-    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["server-status"] }); },
   });
 
   const removeMut = useMutation({
@@ -130,84 +123,79 @@ function ProjectDetail({
   });
 
   return (
-    <div className="p-6 space-y-6 max-w-[1000px]">
-      {/* Header: name + save */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex-1">
-          <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
-            Name
-          </label>
-          <input
-            type="text"
-            value={nameDraft}
-            onChange={(e) => setNameDraft(e.target.value)}
-            className={`w-full px-3 py-2 border rounded-md text-sm text-text ${fieldClass(nameDraft !== project.name)}`}
-          />
-        </div>
-        <div className="pt-5">
+    <>
+      <section>
+        <div className="adm-section">
+          <span>Identity</span>
+          <span className="adm-section-rule" />
           <button
             onClick={handleSave}
             disabled={!isDirty || isSaving}
-            className="btn btn-primary"
+            className="btn btn-sm btn-primary"
           >
             {isSaving ? "Saving…" : "Save"}
           </button>
         </div>
-      </div>
 
-      {/* Repo path (read-only) */}
-      <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
-          Repo path
-        </label>
-        <div className="px-3 py-2 bg-surface border border-border rounded-md text-sm font-mono text-muted">
-          {project.repoPath}
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div>
+            <label className="adm-label">Name</label>
+            <input
+              type="text"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              className={"input" + (nameChanged ? " adm-dirty" : "")}
+            />
+          </div>
+
+          <div>
+            <label className="adm-label">Repo path</label>
+            <div className="adm-value">{project.repoPath}</div>
+          </div>
         </div>
-      </div>
+      </section>
 
-      {/* Instructions — editable rider file */}
-      <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
-          Instructions
-          <span className="ml-2 normal-case tracking-normal font-mono text-muted/60">
+      <section>
+        <div className="adm-section">
+          <span>Instructions</span>
+          <span className="adm-label-aux" style={{ marginLeft: 0 }}>
             {"{project.instructions}"}
           </span>
-        </label>
-        <p className="text-[11px] text-muted mb-2">
-          File: <code className="font-mono">{riderPath}</code>
+          <span className="adm-section-rule" />
+        </div>
+        <p className="adm-section-hint">
+          File: <code style={{ fontFamily: "var(--mono)" }}>{riderPath}</code>
         </p>
         {riderData === undefined ? (
-          <div className="text-muted text-[12px]">loading…</div>
+          <div className="adm-empty" style={{ fontFamily: "var(--mono)" }}>loading…</div>
         ) : (
           <textarea
             value={instructionsDraft}
             onChange={(e) => setInstructionsDraft(e.target.value)}
             rows={16}
-            className={`w-full px-3 py-2 border rounded-md text-[12px] font-mono text-text resize-y leading-relaxed ${fieldClass(instructionsChanged)}`}
+            className={"adm-textarea" + (instructionsChanged ? " adm-dirty" : "")}
           />
         )}
-      </div>
+      </section>
 
-      {/* File tree note */}
-      <div>
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
-          File tree
-          <span className="ml-2 normal-case tracking-normal font-mono text-muted/60">
+      <section>
+        <div className="adm-section">
+          <span>File tree</span>
+          <span className="adm-label-aux" style={{ marginLeft: 0 }}>
             {"{project.file_tree}"}
           </span>
-        </label>
-        <p className="text-[11px] text-muted">
-          Auto-generated by <code className="font-mono">find . -maxdepth 3</code> at triage time
-          (first 200 entries, excludes node_modules/.git/dist). Not editable.
+          <span className="adm-section-rule" />
+        </div>
+        <p className="adm-section-hint">
+          Auto-generated by <code style={{ fontFamily: "var(--mono)" }}>find . -maxdepth 3</code> at
+          triage time (first 200 entries, excludes node_modules / .git / dist). Not editable.
         </p>
-      </div>
+      </section>
 
-      {/* Server endpoints */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <label className="text-[11px] uppercase tracking-wider text-muted">
-            Server endpoints
-          </label>
+      <section>
+        <div className="adm-section">
+          <span>Server endpoints</span>
+          <span className="adm-section-rule" />
           <button
             className="btn btn-sm"
             onClick={() => detectMut.mutate()}
@@ -216,46 +204,64 @@ function ProjectDetail({
             {detectMut.isPending ? "Detecting…" : "Detect"}
           </button>
         </div>
+
         {!project.serverConfig?.endpoints?.length ? (
-          <div className="px-3 py-3 bg-surface border border-dashed border-border rounded-md text-[12px] text-muted text-center">
+          <div
+            className="adm-empty"
+            style={{
+              padding: 14, textAlign: "center", fontFamily: "var(--mono)",
+              border: "1px dashed var(--border-1)", borderRadius: "var(--r-md)",
+            }}
+          >
             No endpoints configured. Click Detect to auto-discover.
           </div>
         ) : (
-          <div className="space-y-1.5">
+          <div className="adm-rows">
             {(status?.endpoints ?? project.serverConfig.endpoints).map((ep) => {
               const running = "running" in ep ? ep.running : false;
               return (
-                <div
-                  key={`${ep.kind}-${ep.port}`}
-                  className="flex items-center gap-3 px-3 py-2 bg-surface border border-border rounded-md"
-                >
+                <div key={`${ep.kind}-${ep.port}`} className="adm-row">
                   <span
-                    className={`w-2 h-2 rounded-full shrink-0 ${running ? "bg-done" : "bg-red-500"}`}
+                    style={{
+                      width: 7, height: 7, borderRadius: "50%",
+                      background: running ? "var(--attn-mid)" : "var(--attn-error)",
+                      flexShrink: 0,
+                      animation: running ? "dot-blink 2.4s ease-in-out infinite" : "none",
+                    }}
                   />
-                  <span className="text-sm text-text font-mono flex-1">
-                    {ep.label ?? ep.kind} · {ep.framework}:{ep.port}
-                  </span>
-                  {!running && (
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => startMut.mutate(ep.kind)}
-                      disabled={startMut.isPending}
+                  <div className="adm-row-label">
+                    <span
+                      style={{
+                        fontFamily: "var(--mono)", fontSize: 12,
+                        color: "var(--fg-0)",
+                      }}
                     >
-                      Start
-                    </button>
-                  )}
+                      {ep.label ?? ep.kind} · {ep.framework}:{ep.port}
+                    </span>
+                  </div>
+                  <div className="adm-row-aux">
+                    {!running && (
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => startMut.mutate(ep.kind)}
+                        disabled={startMut.isPending}
+                      >
+                        Start
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Danger zone */}
-      <div className="border-t border-border pt-6">
-        <label className="text-[11px] uppercase tracking-wider text-muted block mb-2">
-          Danger zone
-        </label>
+      <section>
+        <div className="adm-section">
+          <span>Danger zone</span>
+          <span className="adm-section-rule" />
+        </div>
         <button
           className="btn btn-sm btn-danger"
           disabled={removeMut.isPending}
@@ -266,7 +272,7 @@ function ProjectDetail({
         >
           {removeMut.isPending ? "Removing…" : "Remove project"}
         </button>
-      </div>
-    </div>
+      </section>
+    </>
   );
 }

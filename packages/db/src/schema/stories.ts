@@ -61,6 +61,12 @@ export const stories = pgTable(
     agentOverride: text("agent_override"),
     agentOverrideReason: text("agent_override_reason"),
     parentStoryId: uuid("parent_story_id"),
+    // IDs of other stories that must reach `done` before this one can be
+    // dispatched. Structured form of the natural-language "depends on
+    // sibling X" references agents write into specs. Heartbeat does not
+    // gate on this yet — the field is informational and surfaced in the
+    // UI hierarchy tab so the human can see the dependency graph.
+    prereqStoryIds: jsonb("prereq_story_ids").$type<string[]>().notNull().default([]),
     labels: jsonb("labels").$type<string[]>().notNull().default([]),
     priority: integer("priority").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })

@@ -114,3 +114,22 @@ export async function resolveModelForStory(
   if (!story.agent) return null;
   return resolveModelForAgent(db, story.agent as AgentName);
 }
+
+/**
+ * Per-agent `--max-turns` cap. Lower caps force tighter scope and
+ * directly shrink the accumulated tool-result context that gets billed
+ * as cache_read on every subsequent turn — the dominant per-dispatch
+ * cost. Null = no cap (CLI default).
+ */
+export async function resolveMaxTurnsForAgent(
+  db: OrcaDb,
+  agentName: AgentName,
+): Promise<number | null> {
+  const [agent] = await db
+    .select({ maxTurns: schema.agents.maxTurns })
+    .from(schema.agents)
+    .where(eq(schema.agents.name, agentName))
+    .orderBy(desc(schema.agents.version))
+    .limit(1);
+  return agent?.maxTurns ?? null;
+}

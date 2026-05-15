@@ -55,7 +55,6 @@ export function RefinementQAPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["refinement-questions"] });
       setAnswer("");
-      // Advance to next (same index — the list shrinks under us).
       setIndex((i) => Math.max(0, Math.min(i, items.length - 2)));
     },
   });
@@ -84,49 +83,62 @@ export function RefinementQAPage() {
   }, [items.length, current, answer, answerMut, skipMut]);
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="adm-page">
       <PageHeader
         title={<Breadcrumb first={activeProject?.name ?? "Orca"} second="Refinement Q&A" />}
         subtitle={`${items.length} open`}
         actions={
-          <div className="text-[11px] text-muted">
+          <span
+            style={{ fontFamily: "var(--mono)", fontSize: 10.5, color: "var(--fg-3)" }}
+          >
             j/k · a · ⌘↵ · s · o
-          </div>
+          </span>
         }
       />
-      <div className="flex-1 min-h-0 grid grid-cols-[280px_minmax(0,1fr)_280px]">
-        {/* Left: list */}
-        <aside className="border-r border-border overflow-y-auto">
+
+      <div
+        style={{
+          flex: 1, minHeight: 0, display: "grid",
+          gridTemplateColumns: "300px minmax(0,1fr) 280px",
+        }}
+      >
+        <aside
+          style={{
+            borderRight: "1px solid var(--border-0)",
+            background: "var(--bg-1)", overflowY: "auto", minHeight: 0,
+          }}
+        >
           {isLoading && (
-            <div className="p-4 text-xs text-muted">loading…</div>
-          )}
-          {!isLoading && items.length === 0 && (
-            <div className="p-4 text-xs text-muted">
-              Inbox is empty. Every open question across the pipeline is
-              resolved.
+            <div
+              style={{
+                padding: "18px 14px", color: "var(--fg-2)", fontSize: 12,
+                fontFamily: "var(--mono)",
+              }}
+            >
+              loading…
             </div>
           )}
-          <ul>
+          {!isLoading && items.length === 0 && (
+            <div
+              className="adm-empty"
+              style={{ padding: 16, fontSize: 12 }}
+            >
+              Inbox is empty. Every open question across the pipeline is resolved.
+            </div>
+          )}
+          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {items.map((item, i) => (
               <li key={item.q.id}>
                 <button
-                  className={`w-full text-left px-4 py-2.5 border-b border-border hover:bg-surface transition-colors ${
-                    i === index ? "bg-surface2" : ""
-                  }`}
+                  className={"adm-inbox-row" + (i === index ? " active" : "")}
                   onClick={() => setIndex(i)}
                 >
-                  <div className="text-xs text-muted truncate">
-                    {item.storyTitle}
-                  </div>
-                  <div className="text-sm text-text truncate">
-                    {item.q.question}
-                  </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span className="pill">{item.q.source}</span>
+                  <div className="adm-inbox-story">{item.storyTitle}</div>
+                  <div className="adm-inbox-q">{item.q.question}</div>
+                  <div className="adm-inbox-pills">
+                    <span className="adm-tag">{item.q.source}</span>
                     {item.q.blocksDispatch && (
-                      <span className="pill text-cert-low border-cert-low/40">
-                        blocks dispatch
-                      </span>
+                      <span className="adm-tag adm-tag-error">blocks dispatch</span>
                     )}
                   </div>
                 </button>
@@ -135,106 +147,142 @@ export function RefinementQAPage() {
           </ul>
         </aside>
 
-        {/* Center: current question */}
-        <section className="overflow-y-auto p-6">
+        <section style={{ overflowY: "auto", padding: "24px var(--pad-x)" }}>
           {current ? (
-            <div className="max-w-2xl space-y-4">
-              <div className="text-[11px] uppercase tracking-wider text-muted">
-                {current.storyTitle}
-              </div>
-              <h2 className="text-lg text-text">{current.q.question}</h2>
+            <div style={{ maxWidth: 720, display: "flex", flexDirection: "column", gap: 16 }}>
+              <div className="adm-inbox-story">{current.storyTitle}</div>
+              <h2
+                style={{
+                  fontSize: 18, fontWeight: 500,
+                  color: "var(--fg-0)", lineHeight: 1.35,
+                  margin: 0, letterSpacing: "-0.005em",
+                }}
+              >
+                {current.q.question}
+              </h2>
               {current.q.context && (
-                <p className="text-sm text-muted italic">
+                <p
+                  style={{
+                    margin: 0, color: "var(--fg-2)", fontSize: 13,
+                    fontStyle: "italic", lineHeight: 1.55,
+                  }}
+                >
                   {current.q.context}
                 </p>
               )}
 
               <textarea
                 autoFocus
-                className="input text-sm h-32 resize-none"
+                className="adm-textarea"
+                style={{ minHeight: 140, fontFamily: "var(--sans)", fontSize: 13 }}
                 placeholder="Answer (⌘↵ to submit and advance)"
                 value={answer}
                 onChange={(e) => setAnswer(e.target.value)}
               />
-              <div className="flex items-center gap-2">
+
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <button
-                  className="btn btn-primary"
+                  className="btn btn-sm btn-primary"
                   disabled={!answer || answerMut.isPending}
                   onClick={() =>
-                    current &&
-                    answerMut.mutate({ id: current.q.id, body: answer })
+                    current && answerMut.mutate({ id: current.q.id, body: answer })
                   }
                 >
                   Answer + next
                 </button>
                 <button
-                  className="btn"
+                  className="btn btn-sm"
                   onClick={() => current && skipMut.mutate(current.q.id)}
                 >
                   Skip (obsolete)
                 </button>
                 <Link
                   to={`/stories/${current.q.storyId}`}
-                  className="btn"
+                  className="btn btn-sm"
+                  style={{ textDecoration: "none" }}
                 >
                   Open story
                 </Link>
               </div>
             </div>
           ) : (
-            <div className="text-muted text-sm">
+            <div className="adm-empty" style={{ maxWidth: 560 }}>
               Pick a question from the list, or let the Scrum Master generate
               some by refining a story.
             </div>
           )}
         </section>
 
-        {/* Right: priority factors */}
-        <aside className="border-l border-border p-4 overflow-y-auto">
+        <aside
+          style={{
+            borderLeft: "1px solid var(--border-0)",
+            background: "var(--bg-1)",
+            padding: "20px var(--pad-x)",
+            overflowY: "auto",
+          }}
+        >
           {current && (
             <>
-              <div className="text-[11px] uppercase tracking-wider text-muted mb-2">
-                Priority
+              <div className="adm-section" style={{ marginBottom: 8 }}>
+                <span>Priority</span>
+                <span className="adm-section-rule" />
               </div>
-              <div className="text-2xl text-text">
+              <div
+                style={{
+                  fontFamily: "var(--mono)", fontSize: 28, fontWeight: 500,
+                  color: "var(--fg-0)", fontVariantNumeric: "tabular-nums",
+                }}
+              >
                 {current.q.priority.toFixed(2)}
               </div>
-              <div className="mt-4 space-y-1 text-xs text-muted">
-                <div>
-                  closeness to dispatch:{" "}
-                  <span className="text-text">
-                    {current.q.priorityFactors.closenessToDispatch}
-                  </span>
-                </div>
-                <div>
-                  certainty delta:{" "}
-                  <span className="text-text">
-                    {current.q.priorityFactors.certaintyDelta}
-                  </span>
-                </div>
-                <div>
-                  blocks dispatch:{" "}
-                  <span
-                    className={
-                      current.q.priorityFactors.blocksDispatch
-                        ? "text-cert-low"
-                        : "text-text"
-                    }
-                  >
-                    {String(current.q.priorityFactors.blocksDispatch)}
-                  </span>
-                </div>
-                <div>
-                  age:{" "}
-                  <span className="text-text">
-                    {Math.round(current.q.priorityFactors.ageMs / 60_000)}m
-                  </span>
-                </div>
+              <div
+                style={{
+                  marginTop: 16, display: "flex", flexDirection: "column", gap: 6,
+                  fontSize: 11.5, color: "var(--fg-2)",
+                }}
+              >
+                <PriorityRow
+                  label="closeness to dispatch"
+                  value={String(current.q.priorityFactors.closenessToDispatch)}
+                />
+                <PriorityRow
+                  label="certainty delta"
+                  value={String(current.q.priorityFactors.certaintyDelta)}
+                />
+                <PriorityRow
+                  label="blocks dispatch"
+                  value={String(current.q.priorityFactors.blocksDispatch)}
+                  valueColor={current.q.priorityFactors.blocksDispatch ? "var(--attn-error)" : undefined}
+                />
+                <PriorityRow
+                  label="age"
+                  value={`${Math.round(current.q.priorityFactors.ageMs / 60_000)}m`}
+                />
               </div>
             </>
           )}
         </aside>
       </div>
+    </div>
+  );
+}
+
+function PriorityRow({
+  label, value, valueColor,
+}: {
+  label: string; value: string; valueColor?: string;
+}) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+      <span>{label}</span>
+      <span
+        style={{
+          color: valueColor ?? "var(--fg-0)",
+          fontFamily: "var(--mono)", fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {value}
+      </span>
     </div>
   );
 }

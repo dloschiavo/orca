@@ -1,6 +1,7 @@
 // Thin, typed client over the Hono backend. All endpoints are relative to /api
 // so the Vite dev proxy handles the cross-origin hop.
 
+import { markServerReachable, markServerUnreachable } from "./state/serverStatus.js";
 import type {
   Agent,
   AuditRow,
@@ -23,6 +24,16 @@ export type EnrichedFinding = Finding & {
   latestClassification: Classification | null;
 };
 
+export interface HierarchyNode {
+  id: string;
+  title: string;
+  status: StoryStatus;
+  agent: string | null;
+  parentStoryId: string | null;
+  prereqStoryIds: string[];
+  projectId: string;
+}
+
 export interface ActivityEvent {
   id: string;
   storyId: string;
@@ -37,13 +48,20 @@ async function request<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const r = await fetch(`/api${path}`, {
-    ...init,
-    headers: {
-      "content-type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
+  let r: Response;
+  try {
+    r = await fetch(`/api${path}`, {
+      ...init,
+      headers: {
+        "content-type": "application/json",
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    markServerUnreachable();
+    throw err;
+  }
+  markServerReachable();
   if (!r.ok) {
     const body = await r.text();
     throw new Error(`${r.status} ${r.statusText}: ${body}`);
@@ -93,11 +111,21 @@ export const api = {
       ),
     serverStatus: () =>
       request<{ statuses: ServerStatus[] }>("/projects/server-status"),
-    start: (id: string, kind?: "frontend" | "backend") =>
-      request<{ ok: true; launched: string[] }>(`/projects/${id}/start`, {
-        method: "POST",
-        body: JSON.stringify(kind ? { kind } : {}),
-      }),
+    start: (id: string, opts: { port?: number; cwd?: string } = {}) =>
+      request<{ ok: true; status: string; pid?: number; command?: string }>(
+        `/projects/${id}/start`,
+        { method: "POST", body: JSON.stringify(opts) },
+      ),
+    stop: (id: string, port: number) =>
+      request<{ ok: boolean; killed?: number[]; error?: string }>(
+        `/projects/${id}/stop`,
+        { method: "POST", body: JSON.stringify({ port }) },
+      ),
+    killPid: (id: string, pid: number) =>
+      request<{ ok: boolean; killed?: number; error?: string }>(
+        `/projects/${id}/kill-pid`,
+        { method: "POST", body: JSON.stringify({ pid }) },
+      ),
   },
 
   // --- stories ---
@@ -114,6 +142,7 @@ export const api = {
     counts: () =>
       request<{
         counts: { projectId: string; status: string; count: number }[];
+        agentsWorking: number;
       }>("/stories/counts"),
     get: (id: string) =>
       request<{
@@ -124,6 +153,13 @@ export const api = {
         workingMemory: unknown | null;
         activity: ActivityEvent[];
       }>(`/stories/${id}`),
+    hierarchy: (id: string) =>
+      request<{
+        rootId: string;
+        focusedId: string;
+        nodes: HierarchyNode[];
+        outsideStories: HierarchyNode[];
+      }>(`/stories/${id}/hierarchy`),
     create: (body: {
       projectId: string;
       title: string;
@@ -131,6 +167,7 @@ export const api = {
       status?: "icebox" | "planning" | "backlog";
       agent?: string;
       parentStoryId?: string | null;
+      prereqStoryIds?: string[];
       labels?: string[];
       priority?: number;
     }) =>
@@ -298,7 +335,7 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body),
       }),
-    patch: (name: string, body: { model?: string | null; fastModel?: string | null; description?: string; agentsMd?: string }) =>
+    patch: (name: string, body: { model?: string | null; fastModel?: string | null; maxTurns?: number | null; description?: string; agentsMd?: string }) =>
       request<{ agent: Agent }>(`/agents/${name}`, {
         method: "PATCH",
         body: JSON.stringify(body),

@@ -5,12 +5,17 @@
   "description": "Linear-style PM frontend for agentic code development — the orchestrator.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
+  "goliath": {
+    "project": "orca"
+  },
   "scripts": {
-    "build": "pnpm -r build",
-    "dev": "pnpm -r --parallel --filter=./apps/* --filter=./packages/* dev",
+    "dev": "pnpm -r --parallel --filter=./apps/* dev",
+    "build": "pnpm -r --filter=./apps/* --filter=./packages/* build",
+    "start": "pnpm -r --parallel --filter=./apps/* start",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean",
     "dev:server": "pnpm --filter @orca/server dev",
     "dev:web": "pnpm --filter @orca/web dev",
-    "typecheck": "pnpm -r typecheck",
     "db:push": "pnpm --filter @orca/db push",
     "db:studio": "pnpm --filter @orca/db studio",
     "seed:audit": "pnpm --filter @orca/server seed:audit"
