@@ -61,8 +61,11 @@ function AppShell() {
       <main className="main">
         <Routes>
           <Route path="/" element={<Navigate to="/stories" replace />} />
-          <Route path="/stories" element={<StoriesWorkspacePage />} />
-          <Route path="/stories/:id" element={<StoriesWorkspacePage />} />
+          {/* Single route with an optional :id so navigating from /stories
+              to /stories/<id> doesn't remount the workspace — otherwise
+              an in-flight new-story modal or comment draft gets wiped the
+              moment auto-select fires. */}
+          <Route path="/stories/:id?" element={<StoriesWorkspacePage />} />
           <Route path="/refinement-qa" element={<ScrollPage><RefinementQAPage /></ScrollPage>} />
           <Route path="/findings" element={<ScrollPage><FindingsPage /></ScrollPage>} />
           <Route path="/triggers" element={<ScrollPage><TriggersPage /></ScrollPage>} />

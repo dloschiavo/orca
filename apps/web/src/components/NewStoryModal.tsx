@@ -1,17 +1,40 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { clearDraft, loadDraft, saveDraft } from "../utils/draftStorage.js";
 
 interface NewStoryModalProps {
   onClose: () => void;
   onSubmit: (body: { title: string; specMd: string; status: "icebox" | "planning" | "backlog"; agent: string }) => void;
   submitting: boolean;
   agents: { name: string }[];
+  projectId: string;
 }
 
-export function NewStoryModal({ onClose, onSubmit, submitting, agents }: NewStoryModalProps) {
-  const [title, setTitle] = useState("");
-  const [specMd, setSpecMd] = useState("");
-  const [status, setStatus] = useState<"icebox" | "planning" | "backlog">("planning");
-  const [agent, setAgent] = useState("spec-writer");
+type DraftStatus = "icebox" | "planning" | "backlog";
+interface NewStoryDraft {
+  title: string;
+  specMd: string;
+  status: DraftStatus;
+  agent: string;
+}
+
+function draftKey(projectId: string) {
+  return `newStory:${projectId}`;
+}
+
+export function NewStoryModal({ onClose, onSubmit, submitting, agents, projectId }: NewStoryModalProps) {
+  const initial = useRef<NewStoryDraft | null>(loadDraft<NewStoryDraft>(draftKey(projectId)));
+  const [title, setTitle] = useState(initial.current?.title ?? "");
+  const [specMd, setSpecMd] = useState(initial.current?.specMd ?? "");
+  const [status, setStatus] = useState<DraftStatus>(initial.current?.status ?? "planning");
+  const [agent, setAgent] = useState(initial.current?.agent ?? "spec-writer");
+
+  useEffect(() => {
+    if (!title.trim() && !specMd.trim()) {
+      clearDraft(draftKey(projectId));
+      return;
+    }
+    saveDraft<NewStoryDraft>(draftKey(projectId), { title, specMd, status, agent });
+  }, [projectId, title, specMd, status, agent]);
 
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>

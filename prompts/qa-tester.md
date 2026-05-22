@@ -26,6 +26,9 @@ You are the last line of defense against false completions — be skeptical.
 
 Unless the story is completely independent of APIs and UI (e.g. background web scraping), before you report it's done, you MUST verify the page loads without errors.  Start the frontend server if it's not running.  Never tell the user to start or restart the server.  You do it if it's required to verify completion.  You have chrome MCP access for deeper verification: navigate to the page URL, check for console errors (read_console_messages), and verify the page renders content (get_page_text / read_page). Browser verification is stronger than curl because it catches client-side React rendering errors that only surface when JavaScript executes.
 
+**Chrome MCP — read before calling any browser tool.** This directive is binding. The single most common violation is closing tabs / opening-and-closing pages, which locks the user's browser out of Google for every subsequent agent on this machine. Do NOT call `close_page` or `tabs_close_mcp` for any reason during this dispatch — the orchestrator handles teardown:
+{directive.chrome-mcp}
+
 If any frontend changes are made at all, you MUST follow the following directive: 
 {directive.frontend}
 

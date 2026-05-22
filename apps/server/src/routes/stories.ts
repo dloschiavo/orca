@@ -750,6 +750,51 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       );
     }
 
+    // ── Auto-reassign agent on certain status transitions ────────────────
+    // (1) Moving to `planning` reassigns to spec-writer — the only agent
+    //     that plans. (2) Moving back to `implementing` from a downstream
+    //     status (qa/review/done) restores the implementer that spec-writer
+    //     originally handed off to, so re-opening a finished story doesn't
+    //     leave qa-tester (or null) assigned to the rework. Both rules
+    //     only fire when the caller did not explicitly set `agent` in the
+    //     same PATCH — so an explicit override always wins.
+    if (
+      parsed.agent === undefined &&
+      body.status !== undefined &&
+      body.status !== current.status
+    ) {
+      if (body.status === "planning") {
+        (body as { agent?: string | null }).agent = "spec-writer";
+      } else if (
+        body.status === "implementing" &&
+        (current.status === "qa" ||
+          current.status === "review" ||
+          current.status === "done")
+      ) {
+        // Find the most recent spec-writer handoff: agent_transition where
+        // payload.from === "spec-writer". payload.to is the implementer
+        // spec-writer assigned. If no such event exists (story never went
+        // through spec-writer), skip — keep whatever agent is currently set.
+        const [handoff] = await db
+          .select({ payload: schema.activityEvents.payload })
+          .from(schema.activityEvents)
+          .where(
+            and(
+              eq(schema.activityEvents.storyId, id),
+              eq(schema.activityEvents.kind, "agent_transition"),
+              sql`${schema.activityEvents.payload}->>'from' = 'spec-writer'`,
+            ),
+          )
+          .orderBy(desc(schema.activityEvents.createdAt))
+          .limit(1);
+        const handedOffTo =
+          (handoff?.payload as { to?: string } | null)?.to ?? null;
+        if (handedOffTo && handedOffTo !== "spec-writer") {
+          (body as { agent?: string | null }).agent = handedOffTo;
+        }
+      }
+    }
+
     // Stamp firstBacklogAt the first time a story transitions to "backlog"
     // (covers icebox → backlog moves). Only set once — never overwrite an
     // existing value so re-queuing a story doesn't reset the clock.
@@ -2121,6 +2166,39 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
       // accumulated tool-result context (the dominant per-dispatch
       // cost). Null/unset = no cap.
       ...(maxTurns != null ? ["--max-turns", String(maxTurns)] : []),
+      // Chrome MCP gate.
+      //
+      // Default (env var unset or anything but "1"): the entire Chrome
+      // MCP surface is denied — both `mcp__Claude_in_Chrome` and
+      // `mcp__chrome-devtools`. Dispatched agents see zero browser
+      // tools. This is the fail-safe state.
+      //
+      // Background: orca agents repeatedly violated the chrome-mcp
+      // directive's "one window, navigate in place, never create or
+      // close tabs" rule, thrashing the user's real browser so hard
+      // that Cloudflare flagged the entire browser fingerprint as bot
+      // traffic and Chrome itself refused to load profiles. Profile
+      // recovery is time-based and partially out of our hands; the
+      // only thing we control is whether agents can touch the browser
+      // at all from here on. Default-off.
+      //
+      // To re-enable Chrome MCP for agents, set ORCA_ENABLE_CHROME_MCP=1
+      // in the server's environment. Even with it enabled, the four
+      // tab-lifecycle tools (open/close per family) stay denied — the
+      // orchestrator owns tab lifecycle, not the agent.
+      "--disallowedTools",
+      (process.env.ORCA_ENABLE_CHROME_MCP === "1"
+        ? [
+            "mcp__Claude_in_Chrome__tabs_close_mcp",
+            "mcp__Claude_in_Chrome__tabs_create_mcp",
+            "mcp__chrome-devtools__close_page",
+            "mcp__chrome-devtools__new_page",
+          ]
+        : [
+            "mcp__Claude_in_Chrome",
+            "mcp__chrome-devtools",
+          ]
+      ).join(","),
       "-p",
       effectivePrompt,
       "--dangerously-skip-permissions",

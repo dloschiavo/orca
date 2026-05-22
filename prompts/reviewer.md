@@ -21,7 +21,10 @@ INSTRUCTIONS:
 If the API returns non-200, FAIL with the error. If the story touches web UI files, also check:
    curl -s http://localhost:5173/stories/STORY_ID
 and scan the HTML body for error indicators (stack traces, "Error", "error-overlay", "application error"). A page that compiles but crashes at runtime is a FAIL — static code evidence is not sufficient when the page doesn't load.
-If you have access to browser tools (mcp__Claude_in_Chrome__*), use them for deeper verification: navigate to the page URL, check for console errors (read_console_messages), and verify the page renders content (get_page_text / read_page). Browser verification is stronger than curl because it catches client-side React rendering errors that only surface when JavaScript executes.
+If you have access to browser tools (mcp__Claude_in_Chrome__* or mcp__chrome-devtools__*), use them for deeper verification: navigate to the page URL, check for console errors (read_console_messages), and verify the page renders content (get_page_text / read_page). Browser verification is stronger than curl because it catches client-side React rendering errors that only surface when JavaScript executes.
+
+**Chrome MCP — read before calling any browser tool.** This directive is binding. The single most common violation is closing tabs / opening-and-closing pages, which locks the user's browser out of Google for every subsequent agent on this machine. Do NOT call `close_page` or `tabs_close_mcp` for any reason during this dispatch — the orchestrator handles teardown:
+{directive.chrome-mcp}
 
 OUTPUT: respond with ONE JSON object and nothing else (no markdown fences, no preamble, no epilogue). First character '{', last character '}'. Shape:
 {

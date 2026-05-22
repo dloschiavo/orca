@@ -17,6 +17,7 @@ import {
   eventTurnTokens,
 } from "../utils/activity.js";
 import { renderMarkdown, parseInlineMarkdown, maybePrettyJson } from "../utils/markdown.js";
+import { clearDraft, loadDraft, saveDraft } from "../utils/draftStorage.js";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faEllipsis } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
@@ -294,6 +295,7 @@ export function StoriesWorkspacePage() {
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["stories"] });
       queryClient.invalidateQueries({ queryKey: ["story-counts"] });
+      if (activeProjectId) clearDraft(`newStory:${activeProjectId}`);
       setCreating(false);
       if (result?.story?.id) navigate(`/stories/${result.story.id}`);
     },
@@ -342,6 +344,7 @@ export function StoriesWorkspacePage() {
 
       {creating && (
         <NewStoryModal
+          projectId={activeProjectId}
           onClose={() => setCreating(false)}
           onSubmit={(body) => createMut.mutate(body)}
           submitting={createMut.isPending}
@@ -535,7 +538,7 @@ function StoryDetailPanel({ id }: { id: string }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<DetailTab>("spec");
-  const [commentBody, setCommentBody] = useState("");
+  const [commentBody, setCommentBody] = useState(() => loadDraft<string>(`comment:${id}`) ?? "");
   const [commentInterrupt, setCommentInterrupt] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -560,11 +563,18 @@ function StoryDetailPanel({ id }: { id: string }) {
     else setTab("spec");
   }, [data?.story?.id]);
 
-  // Reset on story switch
+  // Reset on story switch — pull draft for the newly-selected story instead of
+  // wiping whatever the user had typed.
   useEffect(() => {
     setMenuOpen(false);
-    setCommentBody("");
+    setCommentBody(loadDraft<string>(`comment:${id}`) ?? "");
   }, [id]);
+
+  // Persist the draft on every change so accidental dismissal / remount /
+  // reload doesn't lose work.
+  useEffect(() => {
+    saveDraft<string>(`comment:${id}`, commentBody);
+  }, [id, commentBody]);
 
   const dispatchMut = useMutation({
     mutationFn: () => api.stories.dispatch(id),
@@ -607,6 +617,7 @@ function StoryDetailPanel({ id }: { id: string }) {
     mutationFn: () => api.stories.comment(id, { body: commentBody, interrupt: commentInterrupt }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["story", id] });
+      clearDraft(`comment:${id}`);
       setCommentBody("");
     },
   });
