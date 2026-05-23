@@ -1,0 +1,23 @@
+{
+  "name": "@<project-slug>/mobile",
+  "version": "0.0.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "goliath": {
+    "role": "frontend",
+    "name": "mobile",
+    "canonicalPort": 8081,
+    "framework": "expo",
+    "consumes": {
+      "name": "server",
+      "envVar": "<PROJECT_SLUG>_SERVER_URL"
+    }
+  },
+  "scripts": {
+    "dev": "node ../../scripts/service-ports.mjs -- expo start --port {PORT}",
+    "build": "expo export",
+    "start": "node ../../scripts/service-ports.mjs --start -- expo serve --port {PORT}",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .expo"
+  }
+}

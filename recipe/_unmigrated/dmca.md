@@ -1,0 +1,1 @@
+Link to https://goliathdynamics.com/legal/
