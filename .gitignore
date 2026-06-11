@@ -11,3 +11,5 @@ coverage
 .data
 pgdata
 *.tsbuildinfo
+**/.claude/worktrees/
+**/.claude/settings.local.json

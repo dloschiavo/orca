@@ -1,0 +1,23 @@
+{
+  "name": "@<project-slug>/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "goliath": {
+    "role": "frontend",
+    "name": "web",
+    "canonicalPort": 3000,
+    "framework": "next",
+    "consumes": {
+      "name": "server",
+      "envVar": "<PROJECT_SLUG>_SERVER_URL"
+    }
+  },
+  "scripts": {
+    "dev": "node ../../scripts/service-ports.mjs -- next dev -p {PORT}",
+    "build": "next build",
+    "start": "node ../../scripts/service-ports.mjs --start -- next start -p {PORT}",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf .next"
+  }
+}

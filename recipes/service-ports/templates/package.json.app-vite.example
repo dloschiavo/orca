@@ -1,0 +1,23 @@
+{
+  "name": "@<project-slug>/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "goliath": {
+    "role": "frontend",
+    "name": "web",
+    "canonicalPort": 5173,
+    "framework": "vite",
+    "consumes": {
+      "name": "server",
+      "envVar": "<PROJECT_SLUG>_SERVER_URL"
+    }
+  },
+  "scripts": {
+    "dev": "node ../../scripts/service-ports.mjs -- vite --port {PORT} --strictPort",
+    "build": "tsc --noEmit && vite build",
+    "start": "node ../../scripts/service-ports.mjs --start -- vite preview --port {PORT} --host",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist node_modules/.vite"
+  }
+}

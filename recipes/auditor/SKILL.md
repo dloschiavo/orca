@@ -82,7 +82,7 @@ For each skill row in the graph table:
 - `capabilities (default)` column matches `dependencies.capabilities` (each `key (default)` in the table must appear as `key: default` in the frontmatter, and vice versa).
 - `provides` column matches the top-level `provides:` list in the frontmatter.
 
-A skill that has no `dependencies:` block at all (e.g. `web-scraping`, `skill-creator`) must show `—` in all three columns of the graph table. A skill with a `provides:` but no `dependencies:` (e.g. `admin-only-notus`, `otp-auth`, `stack`, `visitor-fingerprint`) must show `—` in `requires` and `capabilities` columns but a real value in `provides`.
+A skill that has no `dependencies:` block at all (e.g. `web-scraping`, `skill-creator`) must show `—` in all three columns of the graph table. A skill with a `provides:` but no `dependencies:` (e.g. `admin-design-system`, `otp-auth`, `stack`, `visitor-fingerprint`) must show `—` in `requires` and `capabilities` columns but a real value in `provides`.
 
 **Drift sources:** the table is hand-maintained — when you add or rename a capability in a SKILL.md, the table doesn't update itself. After every dependency edit, re-derive the relevant row of the table from the frontmatter and diff.
 
@@ -197,7 +197,7 @@ Reviews
 -------
 ℹ️ chat-support/SKILL.md:892 — File Map references app/api/admin/chat+api.ts; this file is now owned by admin-chat
 ℹ️ chat-support/SKILL.md:756 — Anti-pattern "Flat-file admin pages" duplicates admin-chat/SKILL.md:336
-ℹ️ admin-only-notus/SKILL.md frontmatter description mentions "diplomat-app" — _index.md row does not
+ℹ️ admin-design-system/SKILL.md frontmatter description mentions "diplomat-app" — _index.md row does not
 ```
 
 Keep the format flat and grep-able. Don't bury findings inside collapsible sections; this report is read in a terminal.
