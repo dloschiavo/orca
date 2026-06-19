@@ -68,7 +68,11 @@ export async function getVisitorId(): Promise<string | null> {
     const result = await fp.get()
     _visitorId = result.visitorId
     setCookie(COOKIE_NAME, _visitorId, COOKIE_MAX_AGE_DAYS)
-  } catch {
+  } catch (err) {
+    // Fail soft, but log at WARN (see § Logging) — a bundler/CSP regression
+    // that breaks the dynamic import would otherwise silently drop fingerprint
+    // coverage to 0% with no signal. Log the error, never the user agent.
+    console.warn('[fingerprint] failed', err)
     _visitorId = null
   }
   return _visitorId
