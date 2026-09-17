@@ -1,0 +1,28 @@
+# The Node runtime this repo RUNS on, pinned exactly.
+#
+# pnpm requires an exact X.Y.Z here — it rejects a range. This is the one place
+# in the repo that carries a patch version; `engines.node` keeps the `>=` floor
+# and `.nvmrc` keeps the bare major.
+#
+# pnpm provisions this Node on first use and runs every `pnpm run` / `pnpm exec`
+# under it. That is what makes `pnpm dev` work on a shell whose nvm default is
+# older, on a machine that has never had this Node installed. Without it,
+# `engines.node` + `engine-strict=true` can only REFUSE:
+#
+#   ERR_PNPM_UNSUPPORTED_ENGINE  Expected version: >=22.22.2  Got: v20.19.2
+#   To fix this issue, install the required Node version.
+#
+# — i.e. the tooling handing its own job to the operator.
+#
+# Must clear the `engines.node` floor and agree on the major with `.nvmrc` and
+# every `node:<major>` image in the Docker / Cloud Build files. The repo's
+# pin-drift test asserts all of that; a partial bump fails there.
+#
+# scripts/service-ports.mjs reads this same scalar to select the runtime for the
+# entry points pnpm never sees (`npm run dev`, a hand-typed `node scripts/...`).
+useNodeVersion: 22.23.2
+
+# --- the rest of this file is ordinary pnpm workspace config ----------------
+# packages:
+#   - 'apps/*'
+#   - 'packages/*'

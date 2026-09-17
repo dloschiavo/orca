@@ -27,6 +27,7 @@
 
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
@@ -77,6 +78,123 @@ function readJson(file) {
 function die(msg) {
   process.stderr.write(`[service-ports] ${msg}\n`);
   process.exit(2);
+}
+
+// ---------------------------------------------------------------------------
+// The Node runtime pin
+//
+// `engines.node` + `engine-strict=true` declare WHICH Node a repo needs.
+// Neither declares where to GET it — so a package manager that happens to be
+// running on the wrong Node just refuses and tells the operator to go install
+// one by hand. Selecting the runtime is the tooling's job, not theirs.
+//
+// pnpm's own `useNodeVersion` (pnpm-workspace.yaml) is the real fix for
+// `pnpm dev`: pnpm provisions the pinned Node and runs every script under it,
+// so the engine gate is evaluated against the right runtime and passes. That
+// happens before this helper is even spawned.
+//
+// This block is the safety net for the entry points pnpm does not own —
+// `npm run dev`, `node scripts/service-ports.mjs` by hand, an editor task. It
+// does NOT re-exec the helper (which needs nothing newer than fs/net/spawn);
+// it puts the pinned Node FIRST on the PATH the framework child inherits, so
+// `node`/`npx` inside the spawned command resolve to the pinned runtime.
+//
+// Dev only. In --start mode the image owns the runtime — Cloud Run runs a
+// `node:<major>` base whose patch level we neither know nor pin — and a helper
+// that re-pointed PATH there would be guessing at prod.
+
+const NODE_PIN_FILE = "pnpm-workspace.yaml";
+
+// The exact Node version this repo pins, or null if it pins none. Walks up
+// from `dir` so a workspace package finds the root's pin, and stops at the repo
+// root — a `pnpm-workspace.yaml` ABOVE this repo belongs to something else and
+// must never silently choose this repo's runtime. Deliberately a regex rather
+// than a YAML parse: the helper has no dependencies, and this one scalar is all
+// it needs out of the file.
+function readNodePin(dir) {
+  for (let cur = path.resolve(dir); ; ) {
+    const file = path.join(cur, NODE_PIN_FILE);
+    if (fs.existsSync(file)) {
+      const m = fs
+        .readFileSync(file, "utf8")
+        .match(/^useNodeVersion:\s*["']?(\d+\.\d+\.\d+)["']?\s*$/m);
+      if (m) return m[1];
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur || fs.existsSync(path.join(cur, ".git"))) return null;
+    cur = parent;
+  }
+}
+
+// Where an already-installed copy of `pin` lives, or null. Covers the managers
+// that install to a stable, addressable path: pnpm's own managed Node (what
+// `useNodeVersion` provisions), nvm, and a Homebrew keg. fnm is deliberately
+// absent — its multishell dirs are per-shell symlinks with no version in the
+// path, so there is nothing to look up.
+function pinnedNodeBinDir(pin) {
+  const home = os.homedir();
+  const major = pin.split(".")[0];
+  const pnpmHome =
+    process.env.PNPM_HOME ??
+    (process.platform === "darwin"
+      ? path.join(home, "Library", "pnpm")
+      : path.join(home, ".local", "share", "pnpm"));
+  const nvmDir = process.env.NVM_DIR ?? path.join(home, ".nvm");
+  const candidates = [
+    path.join(pnpmHome, "nodejs", pin, "bin"),
+    path.join(nvmDir, "versions", "node", `v${pin}`, "bin"),
+    `/opt/homebrew/opt/node@${major}/bin`,
+    `/usr/local/opt/node@${major}/bin`,
+  ];
+  return candidates.find((d) => fs.existsSync(path.join(d, "node"))) ?? null;
+}
+
+// The Node the helper itself should spawn with. Equals `process.execPath` until
+// selectPinnedNode() finds a pinned interpreter to prefer. A project that
+// extends this helper to launch its own node child (a sidecar, a worker pool)
+// must spawn with nodeExec(), never `process.execPath` — execPath is whatever
+// Node happened to start the helper, which is the thing the pin exists to stop
+// mattering.
+let pinnedNodeExec = process.execPath;
+function nodeExec() {
+  return pinnedNodeExec;
+}
+
+// Dev-mode preflight. Returns the env the framework child should inherit, with
+// the pinned Node's bin dir first on PATH when the running Node is not the pin.
+function selectPinnedNode(env) {
+  const pin = readNodePin(process.cwd());
+  if (!pin || process.versions.node === pin) return env;
+
+  const binDir = pinnedNodeBinDir(pin);
+  if (binDir) {
+    pinnedNodeExec = path.join(binDir, "node");
+    process.stderr.write(
+      `[service-ports] node ${process.versions.node} → ${pin} (repo pin) from ${binDir}\n`,
+    );
+    return { ...env, PATH: `${binDir}${path.delimiter}${env.PATH ?? ""}` };
+  }
+
+  // Nothing to select. Below the pinned major this is a hard stop: a dev
+  // server on too old a runtime is the failure mode that reads as a bug in
+  // application code six weeks later, not as a bad Node.
+  const running = Number(process.versions.node.split(".")[0]);
+  const pinned = Number(pin.split(".")[0]);
+  if (running < pinned) {
+    die(
+      `this repo pins Node ${pin}; this process is Node ${process.versions.node}, ` +
+        `and ${pin} is not installed anywhere I can find it.\n` +
+        `  Install it once:  pnpm env use --global ${pin}\n` +
+        `  (or with nvm:     nvm install ${pin})\n` +
+        `  After that \`pnpm dev\` selects it on its own — pnpm-workspace.yaml ` +
+        `pins useNodeVersion: ${pin}.`,
+    );
+  }
+  process.stderr.write(
+    `[service-ports] node ${process.versions.node}; repo pins ${pin} ` +
+      `(not installed, same major) — continuing\n`,
+  );
+  return env;
 }
 
 // Reads ./package.json `goliath` block for service identity, walks up for
@@ -485,6 +603,11 @@ async function main() {
     return;
   }
 
+  // Select the repo's pinned Node for everything spawned below, before any
+  // port work — an operator who is one `nvm use` behind should never see this
+  // as a port problem, a framework crash, or a wrong answer in the app.
+  const baseEnv = selectPinnedNode(process.env);
+
   // Evict any prior instance of THIS service (same project + name) before
   // doing anything else. Scoped to project+name on purpose — never kills
   // sibling Goliath projects or differently-named services in the same
@@ -531,7 +654,7 @@ async function main() {
       `[service-ports] ${cfg.project}/${cfg.name} → port ${port} (canonical ${cfg.canonicalPort}) → ${file}\n`,
     );
 
-    const env = { ...process.env, PORT: String(port) };
+    const env = { ...baseEnv, PORT: String(port) };
     if (peerUrl && cfg.consumes) env[cfg.consumes.envVar] = peerUrl;
 
     const result = await spawnWithEarlyFailureWatchdog(
