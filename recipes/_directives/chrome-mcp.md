@@ -113,6 +113,29 @@ You will not, under any circumstance:
   switch to its existing tab and re-navigate in place, or read its
   current state with `take_snapshot` / `get_page_text` / `read_page`.
 
+### If `tabs_context_mcp` says "No tab group exists for this session"
+
+`createIfEmpty: true` — and a bare `navigate` with no tabId, which calls it
+for you — creates the group by opening a NEW CHROME WINDOW. That is the
+spawned-window behaviour this directive bans, and `tabs_create_mcp` is
+denied at the tool layer, so Claude-in-Chrome itself has no compliant way to
+load a page. Do not create the group.
+
+The compliant fallback is the Claude desktop app's BUILT-IN browser pane
+(`mcp__Claude_Browser__navigate` with the FULL dev-server URL, e.g.
+`http://localhost:8081/...`). It is the app's own embedded pane, not Chrome —
+no Chrome window, no Chrome binary, no profile — so none of the bans above
+apply, and its `get_page_text` / `read_page` / `javascript_tool` /
+`resize_window` work as usual. Never reach it through `preview_start`: that
+spawns a stray dev-server instance on another port whose `/api/*` calls fail
+(CLAUDE.md's "the Preview MCP can't reach the canonical dev port" is about
+`preview_start`, not the pane). Screenshots need the pane displayed; while it
+is hidden, verify with `get_page_text` / `read_page` / `javascript_tool`
+measurements. If the pane is unavailable too, verify through the API / DB, say
+in the report that the in-browser look is blocked and give the exact URL, and
+ask the user to surface a tab; then re-run `tabs_context_mcp` and navigate it
+in place.
+
 ### If you think you have a legitimate reason to close a tab
 
 You don't. The orchestrator handles teardown. Re-read this section.
@@ -127,6 +150,9 @@ Each navigation and screenshot costs the user wall-clock time and tokens.
   `take_snapshot`) over `take_screenshot` unless the bug is specifically
   visual. Screenshots are the most expensive verification path.
 - If a page already loaded the URL you need, do not re-navigate to it.
+- Do NOT use `browser_batch` (Claude-in-Chrome) on an attached tab. It rejects the tab as
+  "not in Claude's tab group" and the session's group is gone afterwards, which leaves the
+  session with no compliant way to load a page (see the section above). One call per action.
 
 ---
 
