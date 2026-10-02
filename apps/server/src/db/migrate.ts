@@ -307,6 +307,71 @@ CREATE TABLE IF NOT EXISTS implementation_audit (
 CREATE INDEX IF NOT EXISTS audit_project_cluster_idx ON implementation_audit(project_id, cluster);
 CREATE INDEX IF NOT EXISTS audit_project_status_idx ON implementation_audit(project_id, status);
 
+-- PRDs: one row per discovered *.md doc in a project repo. The file on disk is
+-- the source of truth (content, questions, [IMP]/[ICEBOX] markers); this row
+-- carries only orca-side state + dispatch tracking. Distinct from stories.
+CREATE TABLE IF NOT EXISTS prds (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  rel_path text NOT NULL,
+  title text NOT NULL DEFAULT '',
+  last_seen_hash text,
+  last_change_at timestamptz,
+  last_processed_hash text,
+  last_processed_at timestamptz,
+  ignored_at timestamptz,
+  dispatch_pid integer,
+  dispatched_at timestamptz,
+  dispatch_fail_count integer NOT NULL DEFAULT 0,
+  dispatch_state jsonb,
+  claude_session_id text,
+  claude_session_system_prompt_hash text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT prds_project_rel_path_unique UNIQUE (project_id, rel_path)
+);
+CREATE INDEX IF NOT EXISTS prds_project_idx ON prds(project_id);
+
+-- Audit checks: standing standards-checks (prompt lives in prompts/audits/<slug>.md).
+-- NOT the prior implementation_audit concept.
+CREATE TABLE IF NOT EXISTS audit_checks (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  slug text NOT NULL,
+  name text NOT NULL,
+  schedule_kind text NOT NULL DEFAULT 'manual',
+  schedule_time text,
+  schedule_days jsonb NOT NULL DEFAULT '[]'::jsonb,
+  last_run_at timestamptz,
+  next_run_at timestamptz,
+  dispatch_pid integer,
+  dispatched_at timestamptz,
+  dispatch_fail_count integer NOT NULL DEFAULT 0,
+  dispatch_state jsonb,
+  claude_session_id text,
+  claude_session_system_prompt_hash text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT audit_checks_project_slug_unique UNIQUE (project_id, slug)
+);
+CREATE INDEX IF NOT EXISTS audit_checks_next_run_idx ON audit_checks(next_run_at);
+
+CREATE TABLE IF NOT EXISTS audit_findings (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  audit_check_id uuid NOT NULL REFERENCES audit_checks(id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  title text NOT NULL,
+  detail text NOT NULL DEFAULT '',
+  proposed_fix text,
+  answer text,
+  answered_at timestamptz,
+  target_prd_rel_path text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS audit_findings_check_status_idx ON audit_findings(audit_check_id, status);
+
 CREATE TABLE IF NOT EXISTS agents (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
@@ -353,14 +418,26 @@ CREATE INDEX IF NOT EXISTS triggers_next_fire_idx ON triggers(next_fire_at);
 
 CREATE TABLE IF NOT EXISTS activity_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  story_id uuid NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
+  story_id uuid REFERENCES stories(id) ON DELETE CASCADE,
   kind text NOT NULL,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   actor text NOT NULL DEFAULT 'system',
+  dispatch_instance_id text,
+  target_kind text NOT NULL DEFAULT 'story',
+  target_id uuid,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Existing DBs: relax story_id (PRD/audit dispatch events have no owning story)
+-- and add the generic dispatch-target linkage columns. Backfill target_id from
+-- story_id for historical story rows. Idempotent.
+ALTER TABLE activity_events ALTER COLUMN story_id DROP NOT NULL;
+ALTER TABLE activity_events ADD COLUMN IF NOT EXISTS dispatch_instance_id text;
+ALTER TABLE activity_events ADD COLUMN IF NOT EXISTS target_kind text NOT NULL DEFAULT 'story';
+ALTER TABLE activity_events ADD COLUMN IF NOT EXISTS target_id uuid;
+UPDATE activity_events SET target_id = story_id WHERE target_id IS NULL AND story_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS activity_events_story_created_idx ON activity_events(story_id, created_at);
 CREATE INDEX IF NOT EXISTS activity_events_dispatch_instance_idx ON activity_events(story_id, dispatch_instance_id) WHERE dispatch_instance_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS activity_events_target_idx ON activity_events(target_kind, target_id, created_at);
 
 -- Vocabulary migrations. Idempotent — re-running is a no-op once applied.
 -- Story: 'refinement' folded into 'backlog' (agile-standard "committed but
@@ -424,44 +501,56 @@ UPDATE implementation_audit SET status = 'unaudited' WHERE status = 'implementin
 -- Backfill: extract total_tokens_used from stored result activity events for
 -- stories that have the data in their activity feed but never persisted it on
 -- the stories row (race condition in earlier code).
-UPDATE stories s
-SET total_tokens_used = sub.tokens
-FROM (
-  SELECT
-    ae.story_id,
-    (
-      COALESCE((ae.payload->'usage'->>'input_tokens')::int, 0) +
-      COALESCE((ae.payload->'usage'->>'output_tokens')::int, 0) +
-      COALESCE((ae.payload->'usage'->>'cache_read_input_tokens')::int, 0) +
-      COALESCE((ae.payload->'usage'->>'cache_creation_input_tokens')::int, 0)
-    ) AS tokens
-  FROM activity_events ae
-  WHERE ae.kind = 'agent_stream'
-    AND ae.payload->>'type' = 'result'
-    AND ae.story_id IN (SELECT id FROM stories WHERE total_tokens_used IS NULL)
-) sub
-WHERE s.id = sub.story_id
-  AND sub.tokens > 0;
+-- Guarded by column existence: this DML runs inside BASE_DDL, which is BEFORE
+-- autoSyncColumns re-adds any column the live DB is missing. If the column is
+-- temporarily absent (e.g. the migrate-smoke drop/re-add test), skip rather
+-- than 42703 the whole boot. Idempotent.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'stories' AND column_name = 'total_tokens_used') THEN
+    UPDATE stories s
+    SET total_tokens_used = sub.tokens
+    FROM (
+      SELECT
+        ae.story_id,
+        (
+          COALESCE((ae.payload->'usage'->>'input_tokens')::int, 0) +
+          COALESCE((ae.payload->'usage'->>'output_tokens')::int, 0) +
+          COALESCE((ae.payload->'usage'->>'cache_read_input_tokens')::int, 0) +
+          COALESCE((ae.payload->'usage'->>'cache_creation_input_tokens')::int, 0)
+        ) AS tokens
+      FROM activity_events ae
+      WHERE ae.kind = 'agent_stream'
+        AND ae.payload->>'type' = 'result'
+        AND ae.story_id IN (SELECT id FROM stories WHERE total_tokens_used IS NULL)
+    ) sub
+    WHERE s.id = sub.story_id
+      AND sub.tokens > 0;
+  END IF;
+END $$;
 
 -- Backfill: extract total_cost_usd from stored result activity events for
 -- stories that have the data in their activity feed but never persisted it on
 -- the stories row. Sums across all result events to match the accumulation
--- logic in the runtime dispatch path.
-UPDATE stories s
-SET total_cost_usd = sub.cost
-FROM (
-  SELECT
-    ae.story_id,
-    SUM(CAST(ae.payload->>'total_cost_usd' AS double precision)) AS cost
-  FROM activity_events ae
-  WHERE ae.kind = 'agent_stream'
-    AND ae.payload->>'type' = 'result'
-    AND ae.payload->>'total_cost_usd' IS NOT NULL
-    AND ae.story_id IN (SELECT id FROM stories WHERE total_cost_usd IS NULL)
-  GROUP BY ae.story_id
-) sub
-WHERE s.id = sub.story_id
-  AND sub.cost > 0;
+-- logic in the runtime dispatch path. Column-existence guarded (see above).
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'stories' AND column_name = 'total_cost_usd') THEN
+    UPDATE stories s
+    SET total_cost_usd = sub.cost
+    FROM (
+      SELECT
+        ae.story_id,
+        SUM(CAST(ae.payload->>'total_cost_usd' AS double precision)) AS cost
+      FROM activity_events ae
+      WHERE ae.kind = 'agent_stream'
+        AND ae.payload->>'type' = 'result'
+        AND ae.payload->>'total_cost_usd' IS NOT NULL
+        AND ae.story_id IN (SELECT id FROM stories WHERE total_cost_usd IS NULL)
+      GROUP BY ae.story_id
+    ) sub
+    WHERE s.id = sub.story_id
+      AND sub.cost > 0;
+  END IF;
+END $$;
 
 -- Backfill: set agent to 'backend' for stories that were dispatched
 -- before triage/default-agent code was added.
@@ -492,7 +581,10 @@ VALUES
   ('explorer',       1, 'Pure research — no edits permitted.',            false),
   ('classifier',     1, 'Routes every finding to an upstream cause.',     false),
   ('compactor',      1, 'Rewrites Working Memory each heartbeat tick.',   false),
-  ('auditor',        1, 'Audits codebase against recipe specs; creates stories for gaps.', false)
+  ('auditor',        1, 'Audits codebase against recipe specs; creates stories for gaps.', false),
+  ('drafter',        1, 'Keeps each PRD''s questions folded in; marks ready/icebox line-items. Does not create stories.', false),
+  ('full-stack-engineer', 1, 'Implements ready PRD items and fixes audit fails.', true),
+  ('audit-runner',   1, 'Runs a standing standards-audit (read-only) and reports findings.', false)
 ON CONFLICT (name, version) DO NOTHING;
 
 -- Agent prompts now live as flat files at <repo>/prompts/<agent>.md

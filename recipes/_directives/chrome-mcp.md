@@ -115,26 +115,14 @@ You will not, under any circumstance:
 
 ### If `tabs_context_mcp` says "No tab group exists for this session"
 
-`createIfEmpty: true` — and a bare `navigate` with no tabId, which calls it
-for you — creates the group by opening a NEW CHROME WINDOW. That is the
-spawned-window behaviour this directive bans, and `tabs_create_mcp` is
-denied at the tool layer, so Claude-in-Chrome itself has no compliant way to
-load a page. Do not create the group.
-
-The compliant fallback is the Claude desktop app's BUILT-IN browser pane
-(`mcp__Claude_Browser__navigate` with the FULL dev-server URL, e.g.
-`http://localhost:8081/...`). It is the app's own embedded pane, not Chrome —
-no Chrome window, no Chrome binary, no profile — so none of the bans above
-apply, and its `get_page_text` / `read_page` / `javascript_tool` /
-`resize_window` work as usual. Never reach it through `preview_start`: that
-spawns a stray dev-server instance on another port whose `/api/*` calls fail
-(CLAUDE.md's "the Preview MCP can't reach the canonical dev port" is about
-`preview_start`, not the pane). Screenshots need the pane displayed; while it
-is hidden, verify with `get_page_text` / `read_page` / `javascript_tool`
-measurements. If the pane is unavailable too, verify through the API / DB, say
-in the report that the in-browser look is blocked and give the exact URL, and
-ask the user to surface a tab; then re-run `tabs_context_mcp` and navigate it
-in place.
+Call `tabs_context_mcp {createIfEmpty: true}` and use the tab it returns —
+that is the sanctioned path, not a violation. "No tab group" is NEVER a
+blocker and NEVER a reason to fall back to the desktop app's built-in
+browser pane or to API/DB-only verification (David, 2026-09-24: "nothing is
+stopping you from accessing chrome. there are already open tabs." — the
+earlier text here told agents to fall back to the pane instead, and saying so
+in a session is itself the failure). Do it once per session, then
+`navigate` that tab in place for everything after.
 
 ### If you think you have a legitimate reason to close a tab
 
@@ -150,9 +138,35 @@ Each navigation and screenshot costs the user wall-clock time and tokens.
   `take_snapshot`) over `take_screenshot` unless the bug is specifically
   visual. Screenshots are the most expensive verification path.
 - If a page already loaded the URL you need, do not re-navigate to it.
-- Do NOT use `browser_batch` (Claude-in-Chrome) on an attached tab. It rejects the tab as
-  "not in Claude's tab group" and the session's group is gone afterwards, which leaves the
-  session with no compliant way to load a page (see the section above). One call per action.
+- `browser_batch` works on the session's group tab (the one `tabs_context_mcp` returned) —
+  prefer it for multi-step click/type/read sequences.
+
+## 4. A blank screenshot of a hidden tab is NOT a rendering bug
+
+The session's tab usually lives in a window the user isn't looking at, so the
+page reports `document.visibilityState === 'hidden'`. In that state `computer
+{screenshot}` is unreliable once the page is scrolled: frames come back with
+fixed/sticky chrome misplaced or missing and the rest blank, and past a few
+thousand px of scroll they come back as one uniform dark frame. The capture
+also silently overrides the page's viewport (`innerWidth`/`innerHeight` jump
+by 4/3 and stay that way). None of that is the page.
+
+Before you diagnose a blank or partial frame as a page bug (GPU layer limits,
+`will-change`, `content-visibility`, a too-tall list):
+
+1. Read `document.visibilityState` with `javascript_tool`. If it's `hidden`,
+   the screenshot proves nothing about scrolled content.
+2. Judge layout by geometry, not pixels: check `getBoundingClientRect()` on
+   the fixed/sticky chrome and the target elements at that `scrollY`.
+3. Run a control in the same tab: `document.write` a plain page of tall
+   coloured stripes plus a fixed footer, scroll it the same distance, and
+   capture it. If the control blanks too, the capture is the cause. Navigate
+   back afterwards.
+
+Never raise or focus the window to make the capture work (rule 1). Why: on
+2026-10-01 a metamox `/reserve-list` "blank frame past scrollY 5000" turned out
+to be this. A dependency-free 20k-px stripes page failed the same way at the
+same offsets.
 
 ---
 

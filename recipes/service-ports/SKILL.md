@@ -7,9 +7,14 @@ description: >
   own prior instance (same project + same name) on each new run, and hunts
   for a free port when colliding with sibling projects. Service identity
   (role, name, canonical port, framework, optional backend peer) lives in
-  each package.json's `goliath` block — a single source of truth. Handles
-  Vite/Next/Express/Hono/Expo. Dev-only registration; `pnpm start` is the
-  uniform prod entry that Cloud Run drives via `process.env.PORT`.
+  each package.json's `goliath` block — a single source of truth. The Node
+  runtime is pinned once as `useNodeVersion` in pnpm-workspace.yaml, so
+  `pnpm dev` PROVISIONS AND SELECTS its own Node instead of refusing with
+  ERR_PNPM_UNSUPPORTED_ENGINE and telling the operator to go install one; the
+  helper applies the same pin to the entry points pnpm never sees (`npm run
+  dev`, a hand-typed `node scripts/...`). Handles Vite/Next/Express/Hono/Expo.
+  Dev-only registration; `pnpm start` is the uniform prod entry that Cloud Run
+  drives via `process.env.PORT`.
 dependencies:
   requires: []
   capabilities: {}
@@ -111,6 +116,89 @@ Rules:
 - `pnpm start` is **always** the prod runtime. It also goes through the helper — but in `--start` mode, which just resolves `PORT` from env (Cloud Run injects it) with a fallback to `goliath.canonicalPort`, and execs the framework. No registry, no eviction.
 - A monorepo root with multiple apps gets the same five scripts; root delegates to its apps in parallel.
 - Library packages (`packages/*`) that have no dev server omit `dev` and `start`. They keep `build`/`typecheck`/`clean`. The root's `pnpm dev` filters them out. Libraries also don't need a `goliath` block.
+
+## The Node Pin
+
+`pnpm dev` has to be runnable without a ritual. A repo that declares
+`engines.node` and turns on `engine-strict=true` has said which Node it needs —
+and a package manager that then *refuses*, because the operator's shell is one
+`nvm use` behind, has handed its own job back to the operator:
+
+```
+ ERR_PNPM_UNSUPPORTED_ENGINE  Unsupported environment (bad pnpm and/or Node.js version)
+ Expected version: >=22.22.2
+ Got: v20.19.2
+ To fix this issue, install the required Node version.
+```
+
+Declaring a requirement is not selecting a runtime. Every Goliath repo does
+both, and the second half is the package manager's work, not a human's.
+
+**The pin lives in `pnpm-workspace.yaml`, exactly once:**
+
+```yaml
+useNodeVersion: 22.23.2
+```
+
+pnpm provisions that Node on first use and runs every `pnpm run` / `pnpm exec`
+under it, so the engine gate is evaluated against the runtime the repo asked
+for and passes. `pnpm dev` then works on any shell, with no `nvm use`, on a
+machine that has never had that Node installed.
+
+Rules:
+
+- **`useNodeVersion` takes an exact `X.Y.Z`** — pnpm rejects a range. This is
+  the one place in a repo that carries a patch version.
+- **`engines.node` stays**, as the published floor (`>=X.Y.Z`). The two are not
+  redundant: `engines` is the *contract* that consumers and `npm ci` enforce;
+  `useNodeVersion` is the *selection* that makes the contract satisfiable with
+  no operator action. The pin must clear the floor, or pnpm provisions a Node
+  its own gate then rejects — the original error, on a correctly configured
+  machine.
+- **`.nvmrc` stays too**, as the bare major, for nvm / fnm / `setup-node` /
+  editors. It is a hint for other tools, never the thing that makes `pnpm dev`
+  work.
+- **One assertion keeps them from drifting.** A repo test compares the
+  `useNodeVersion` major against `.nvmrc`, `engines.node`, and every
+  `node:<major>` image in the Docker / Cloud Build files. A partial bump fails
+  there rather than at runtime weeks later.
+
+### What the helper adds
+
+pnpm can only fix the entry points pnpm owns. `npm run dev`, a hand-typed
+`node scripts/service-ports.mjs`, and an editor task all bypass it — so the
+helper reads the same `useNodeVersion` scalar and does the selection itself:
+
+| Running Node | Helper does |
+|---|---|
+| equals the pin | nothing (the `pnpm dev` path — pnpm already selected it) |
+| differs, pin installed | prepends the pinned Node's `bin` to the **framework child's** `PATH`, so `node` / `npx` inside the spawned command resolve to it |
+| differs, pin absent, same major | one warning line, continues |
+| differs, pin absent, lower major | **exits 2** naming `pnpm env use --global <pin>` |
+
+It never re-execs itself — the helper needs nothing newer than `fs` / `net` /
+`spawn`, and a supervisor process per dev server to fix a `PATH` would be a
+worse trade. It looks for an installed pin in pnpm's own managed dir
+(`$PNPM_HOME/nodejs/<pin>/bin`), nvm (`$NVM_DIR/versions/node/v<pin>/bin`), and
+a Homebrew keg (`node@<major>`). fnm is deliberately not searched: its
+multishell dirs carry no version in the path, so there is nothing to look up.
+
+The lower-major case is a hard stop on purpose. Too old a runtime is the
+failure mode that does not announce itself — it surfaces as four innocent-looking
+test failures, or a silently degraded artifact, weeks downstream.
+
+**`--start` mode skips all of it, and prod never sees the pin at all.**
+`useNodeVersion` is a pnpm-only key in a file npm does not read, and Goliath
+prod images build with `npm ci` — so nothing about this pin is reachable from a
+deployed service. The image owns the runtime there (a `node:<major>` base whose
+patch level the repo neither knows nor pins), and a helper that re-pointed
+`PATH` in `--start` mode would be guessing at prod. Keep it that way: the pin is
+a dev-ergonomics mechanism, not a deployment control.
+
+**A project that extends the helper to spawn its own node child** (a scraper
+sidecar, a worker pool) must spawn with `nodeExec()`, never
+`process.execPath`. `execPath` is whatever Node happened to start the helper,
+which is the exact thing the pin exists to stop mattering.
 
 ## The Helper
 
@@ -223,6 +311,7 @@ What the recipe drops into the target project:
 <project>/
   scripts/
     service-ports.mjs                    ← copied verbatim from templates/
+  pnpm-workspace.yaml                    ← adds `useNodeVersion: <X.Y.Z>` (the Node pin)
   package.json                           ← adds `goliath: { project }` + script block (root)
   apps/*/package.json                    ← adds `goliath` block (per-service identity) + script block
   packages/*/package.json                ← script block only (libraries; no goliath block)
@@ -246,11 +335,16 @@ Before writing any file, the recipe runs these checks. Any failure stops the ins
 | `no-lsof-kill-in-pre-hooks` | `rg -n 'lsof -ti.*xargs kill' package.json apps/*/package.json packages/*/package.json` | Zero matches. These `pre*` hooks are the cross-project killing behavior this recipe replaces; they must be deleted before the helper goes in. |
 | `no-canonical-port-flag` | `rg -n -- '--canonical-port' package.json apps/*/package.json` | Zero matches. The CLI flag form is the old API; ports now live in `goliath.canonicalPort`. |
 | `no-hardcoded-port-in-scripts` | `rg -nP ':\s*\d{4,5}' apps/*/package.json` | Zero matches **outside** the `goliath` block. (Ports in `goliath.canonicalPort` are the SSoT and exempt.) |
-| `vite-strict-port` | `rg -n '"dev":.*vite( |$)' apps/*/package.json` | Every match passes `--port {PORT} --strictPort` (after install). |
+| `vite-strict-port` | `rg -n '"dev":.*vite( \|$)' apps/*/package.json` | Every match passes `--port {PORT} --strictPort` (after install). |
 | `no-hardcoded-localhost-proxy` | `rg -n "localhost:[0-9]+" apps/*/vite.config.ts apps/*/next.config.* 2>/dev/null` | Zero matches. Frontends read the helper-injected env var with no port literal as fallback. |
 | `no-hardcoded-localhost-cors` | `rg -n '"http://localhost:[0-9]+"' apps/*/src/**/*.ts 2>/dev/null` | Zero matches in CORS allow-list literals. Dev = regex; prod = env-driven. |
 | `goliath-block-present` | (script reads each `apps/*/package.json` JSON) | Each app has a `goliath` block with `role`, `name`, `canonicalPort`, `framework`. Backends have no `consumes`; frontends with `consumes` have `name` + `envVar`. |
-| `node-20-or-later` | `node -p "process.versions.node"` | Major ≥ 20 (the helper uses `fs.writeFileSync` `flag: "wx"`, `net.createServer`, ESM imports). |
+| `node-20-or-later` | `node -p "process.versions.node"` | Major ≥ 20 (the helper uses `fs.writeFileSync` `flag: "wx"`, `net.createServer`, ESM imports). This is about the Node running the *install*, not the repo's pin. |
+| `node-pin-present` | `rg -n '^useNodeVersion:\s*\d+\.\d+\.\d+$' pnpm-workspace.yaml` | Exactly one match, an exact `X.Y.Z`. A repo with `engines.node` and no `useNodeVersion` can only *refuse* a wrong Node, never select the right one — the ERR_PNPM_UNSUPPORTED_ENGINE dead end this pin exists to delete. |
+| `node-pin-clears-engines-floor` | (script compares `useNodeVersion` to every `engines.node` floor) | The pinned version satisfies every package's `engines.node`. A pin *below* the floor makes pnpm provision a Node its own gate then rejects — the original error, now on a correctly configured machine. |
+| `node-pin-agrees-with-other-pins` | (repo test: `useNodeVersion` major vs `.nvmrc`, `engines.node`, every `node:<major>` image in the Docker / Cloud Build files) | All equal. The pins must move together; a partial bump is the drift this assertion exists to catch. |
+| `no-execpath-spawn` | `rg -n 'spawn\(process\.execPath' scripts/service-ports.mjs` | Zero matches. Node children the helper launches itself (sidecars, worker pools) go through `nodeExec()` so they inherit the pin too. |
+| `no-nvm-use-in-scripts` | `rg -n 'nvm (use\|install)' package.json apps/*/package.json` | Zero matches. Selecting a runtime is `useNodeVersion`'s job; an `nvm use` in a script only works in a shell that already sourced nvm, and silently does nothing in CI or an editor task. |
 
 ## Concrete Script Blocks (templates)
 
@@ -389,6 +483,11 @@ Library package (no dev server, no goliath block):
 13. **Probing only `127.0.0.1`.** An orphan listening on `::` (dual-stack) is invisible to a `127.0.0.1`-only probe on systems where `IPV6_V6ONLY` differs between sockets — the probe passes, the framework binds the same port the framework's own default address family looks at, and crashes with `EADDRINUSE: address ':::PORT'`. The probe must check both `::` and `0.0.0.0`. This is the single most common production failure for naive port helpers.
 14. **No early-failure watchdog.** Even with a perfect probe, frameworks can fail to bind because of TIME_WAIT races, framework-internal sub-ports (Vite worker socket, Next.js telemetry port), and address-family quirks the probe can't model exactly. If the helper does not watch the spawned child for the first ~2 s and re-hunt on early non-zero exit, every one of those races bubbles up as a confusing `pnpm dev` crash. The two layers — probe and watchdog — together cover the failure surface.
 15. **`consumes` on a backend.** Backends are addressable identities; they don't reach out. If your "backend" needs to call another backend, that's a service-to-service concern handled by a real service-discovery mechanism, not by this recipe.
+16. **`engines.node` + `engine-strict=true` with no `useNodeVersion`.** This is the configuration that produces `ERR_PNPM_UNSUPPORTED_ENGINE … To fix this issue, install the required Node version` on a shell one `nvm use` behind. The repo has stated a requirement and then refused to satisfy it. Declaring a requirement and selecting a runtime are two jobs; a repo that does only the first has moved its own setup onto every operator, on every machine, forever.
+17. **A range in `useNodeVersion`, or a pin below the `engines.node` floor.** pnpm rejects the range outright. The below-floor pin is worse, because it looks configured: pnpm dutifully provisions a Node, then its own engine gate rejects it, and the error is identical to having no pin at all.
+18. **`nvm use` — in a `predev` hook, in a script, or in the README as "the fix".** It only works in a shell that has already sourced nvm, so it silently does nothing in CI, in an editor task, or under any other version manager. It is also the wrong shape: a README step is the operator doing the tooling's job.
+19. **Spawning a node child with `process.execPath`** (a sidecar, a worker pool, a codegen step). `execPath` is whatever Node started the helper — the exact thing the pin exists to stop mattering. Use `nodeExec()`, which is the pinned interpreter when one was resolved and `execPath` otherwise.
+20. **Re-execing the helper under the pinned Node.** Tempting, and wrong: it leaves a supervisor process per dev server for the life of the session to fix something a `PATH` entry on the child already fixes. The helper needs nothing newer than `fs`/`net`/`spawn`; the *framework* is what needs the pin.
 
 ## Verification
 
@@ -410,5 +509,11 @@ After install, all of the following must hold:
 7. **No 500 ISE.** Browse all main routes; server log shows no 500s.
 8. **GCP `start` smoke.** `pnpm build && PORT=8080 pnpm --filter @<scope>/server start &`. Verify it binds 8080 and **does not** write `/tmp/goliath-8080`.
 9. **Schema violations rejected.** Add `consumes` to a backend's goliath block; `pnpm dev` must exit 2 with a clear error before doing anything.
+10. **Node pin selects, from a deliberately wrong shell.** In a shell whose Node is *below* the pin (`nvm use 20`), run `pnpm dev`. Expect no `ERR_PNPM_UNSUPPORTED_ENGINE`, the dev server up, and the process on the pinned Node — check the binary, not a version string something printed:
+    ```
+    lsof -p $(python3 -c "import json;print(json.load(open('/tmp/goliath-<port>'))['pid'])") | awk '$4=="txt"{print $NF; exit}'
+    ```
+    Must be the pinned `.../nodejs/<pin>/bin/node` (or `.../v<pin>/bin/node`). Then, from that same wrong shell, `npm run dev` — pnpm is out of the picture, so the helper itself must log `node <running> → <pin> (repo pin) from <dir>` and the framework child must still land on the pin.
+11. **Node pin hard stop.** Temporarily set `useNodeVersion` to an uninstalled *higher* major (`99.0.0`) and run `pnpm dev` from a shell below it. The helper must exit 2 naming `pnpm env use --global 99.0.0`, and must NOT start a dev server on the wrong runtime. Then set an uninstalled *same-major* patch: one warning line, and it continues.
 
 If any step fails the install is not done.

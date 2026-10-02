@@ -50,19 +50,30 @@ export function Sidebar() {
 
   const allStories = allStoriesData?.stories ?? [];
 
-  // Group active-agent stories by their assigned agent name. Match the topbar's
-  // definition of "agent working": a story with a live dispatched process
-  // (dispatchPid != null). Using status alone overcounts — a story can sit in
-  // `implementing`/`qa` after a crash or between heartbeat ticks with no live
-  // process, which is why the sidebar previously diverged from the topbar.
-  const agentBuckets = new Map<string, Story[]>();
+  // Live PRD/audit dispatches (drafter / full-stack-engineer / audit-runner).
+  // DB-only endpoint — cheap, no per-project disk scan.
+  const { data: activeAgentsData } = useQuery({
+    queryKey: ["active-agents-sidebar"],
+    queryFn: () => api.activeAgents.list(),
+    refetchInterval: 5_000,
+  });
+
+  // Group active-agent work by agent name. "Agent working" = a live dispatched
+  // process (dispatchPid != null for stories; a row in /active-agents for
+  // prds/audits). Items carry the thing being processed so the row can show it.
+  const agentBuckets = new Map<string, ActiveItem[]>();
   for (const s of allStories) {
     if (s.dispatchPid == null) continue;
     const name = s.agentOverride ?? s.agent;
     if (!name) continue;
     const bucket = agentBuckets.get(name) ?? [];
-    bucket.push(s);
+    bucket.push({ kind: "story", id: s.id, label: s.title });
     agentBuckets.set(name, bucket);
+  }
+  for (const d of activeAgentsData?.dispatches ?? []) {
+    const bucket = agentBuckets.get(d.agent) ?? [];
+    bucket.push({ kind: d.kind, id: d.id, label: d.label });
+    agentBuckets.set(d.agent, bucket);
   }
   const activeAgentRows = Array.from(agentBuckets.entries()).sort(([a], [b]) => a.localeCompare(b));
 
@@ -78,11 +89,12 @@ export function Sidebar() {
     projectBadges.set(row.projectId, entry);
   }
 
-  // A project pulses when any of its stories has a live dispatched process.
+  // A project pulses when any of its stories — or PRDs/audits — has a live agent.
   const projectsWithActiveAgent = new Set<string>();
   for (const s of allStories) {
     if (s.dispatchPid != null) projectsWithActiveAgent.add(s.projectId);
   }
+  for (const d of activeAgentsData?.dispatches ?? []) projectsWithActiveAgent.add(d.projectId);
 
   // Count stories waiting on the human (planning = spec-writer asking questions, review/blocked = needs your input)
   const planningStories = allStories.filter((s) => s.status === "planning");
@@ -140,11 +152,14 @@ export function Sidebar() {
         {activeAgentRows.length === 0 && humanStories.length === 0 && (
           <div style={{ padding: "4px var(--pad-x)", color: "var(--fg-3)", fontSize: 11.5 }}>all idle</div>
         )}
-        {activeAgentRows.map(([name, stories]) => (
-          <AgentRow key={name} agentName={name} stories={stories} />
+        {activeAgentRows.map(([name, items]) => (
+          <AgentRow key={name} agentName={name} items={items} />
         ))}
         {humanStories.length > 0 && (
-          <AgentRow agentName="__human__" stories={humanStories} />
+          <AgentRow
+            agentName="__human__"
+            items={humanStories.map((s) => ({ kind: "story" as const, id: s.id, label: s.title }))}
+          />
         )}
 
         <div className="sb-divider" />
@@ -168,9 +183,15 @@ export function Sidebar() {
   );
 }
 
+interface ActiveItem {
+  kind: "story" | "prd" | "audit";
+  id: string;
+  label: string;
+}
+
 interface AgentRowProps {
   agentName: string;
-  stories: Story[];
+  items: ActiveItem[];
 }
 
 const AGENT_TASK_LABEL: Record<string, string> = {
@@ -178,26 +199,54 @@ const AGENT_TASK_LABEL: Record<string, string> = {
   "scrum-master": "planning",
   "reviewer":     "verifying",
   "auditor":      "auditing",
+  "drafter":      "drafting",
+  "full-stack-engineer": "implementing",
+  "audit-runner": "auditing",
   "__human__":    "awaiting you",
 };
 
-function AgentRow({ agentName, stories }: AgentRowProps) {
+const ITEM_ROUTE: Record<ActiveItem["kind"], string> = {
+  story: "stories",
+  prd: "prds",
+  audit: "audits",
+};
+
+function AgentRow({ agentName, items }: AgentRowProps) {
+  const navigate = useNavigate();
   const isHuman = agentName === "__human__";
   const { icon, color } = isHuman
     ? { icon: faUser, color: "var(--ag-human)" }
     : resolveAgentDisplay(agentName);
   const label = isHuman ? "you" : agentName;
-  const taskLabel = AGENT_TASK_LABEL[agentName] ?? "working";
+  // When the agent is on exactly one item, show that item's title (which one
+  // it's processing); otherwise fall back to the task verb + count.
+  const taskText = items.length === 1 ? items[0]!.label : AGENT_TASK_LABEL[agentName] ?? "working";
+  const first = items[0];
 
   return (
-    <div className="sb-agent" title={stories.map((s) => s.id).join(", ")}>
+    <div
+      className="sb-agent"
+      title={items.map((i) => i.label).join("\n")}
+      onClick={() => first && navigate(`/${ITEM_ROUTE[first.kind]}/${first.id}`)}
+    >
       <span className="sb-agent-glyph" style={{ color }}>
         <FontAwesomeIcon icon={icon} />
       </span>
-      <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         <span className="sb-agent-name">{label}</span>
         <span className="sb-agent-task">
-          {taskLabel}
+          <span
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              display: "inline-block",
+              maxWidth: 108,
+              verticalAlign: "bottom",
+            }}
+          >
+            {taskText}
+          </span>
           {!isHuman && (
             <span className="typing" style={{ marginLeft: 4, color }}>
               <i /><i /><i />
@@ -205,7 +254,7 @@ function AgentRow({ agentName, stories }: AgentRowProps) {
           )}
         </span>
       </div>
-      <span className="sb-agent-count">{stories.length}</span>
+      <span className="sb-agent-count">{items.length}</span>
     </div>
   );
 }

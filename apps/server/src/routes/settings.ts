@@ -10,10 +10,11 @@ import {
 const patchSchema = z.object({
   throttle: z
     .object({
-      maxConcurrentPerProject: z.number().int().min(1).optional(),
-      maxConcurrentTotal: z.number().int().min(1).optional(),
-      maxConcurrentQa: z.number().int().min(1).optional(),
-      maxConcurrentSpecWriter: z.number().int().min(1).optional(),
+      maxConcurrentPerProject: z.number().int().min(0).optional(),
+      maxConcurrentTotal: z.number().int().min(0).optional(),
+      maxConcurrentQa: z.number().int().min(0).optional(),
+      maxConcurrentSpecWriter: z.number().int().min(0).optional(),
+      maxConcurrentAudit: z.number().int().min(0).optional(),
     })
     .optional(),
 });
@@ -72,6 +73,12 @@ export function settingsRoutes() {
         await upsert(
           THROTTLE_KEYS.maxConcurrentSpecWriter,
           body.throttle.maxConcurrentSpecWriter,
+        );
+      }
+      if (body.throttle.maxConcurrentAudit !== undefined) {
+        await upsert(
+          THROTTLE_KEYS.maxConcurrentAudit,
+          body.throttle.maxConcurrentAudit,
         );
       }
     }

@@ -9,6 +9,8 @@ export * from "./token-heatmaps.js";
 export * from "./findings.js";
 export * from "./refinement-questions.js";
 export * from "./audit.js";
+export * from "./audit-checks.js";
+export * from "./prds.js";
 export * from "./agents.js";
 export * from "./project-riders.js";
 export * from "./triggers.js";

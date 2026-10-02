@@ -5,10 +5,17 @@ import { markServerReachable, markServerUnreachable } from "./state/serverStatus
 import type {
   Agent,
   AuditRow,
+  AuditCheck,
+  AuditCheckSummary,
+  AuditFinding,
+  AuditScheduleKind,
   AvailableModel,
   Classification,
   Finding,
   FindingStatus,
+  Prd,
+  PrdSummary,
+  PrdParse,
   Project,
   RefinementQuestion,
   ServerConfig,
@@ -34,14 +41,25 @@ export interface HierarchyNode {
   projectId: string;
 }
 
+export interface ActiveDispatch {
+  agent: string;
+  kind: "prd" | "audit";
+  id: string;
+  projectId: string;
+  label: string;
+  dispatchedAt: string | null;
+}
+
 export interface ActivityEvent {
   id: string;
-  storyId: string;
+  storyId: string | null;
   kind: string;
   actor: string;
   payload: Record<string, unknown>;
   createdAt: string;
   dispatchInstanceId?: string | null;
+  targetKind?: string;
+  targetId?: string | null;
 }
 
 async function request<T>(
@@ -225,6 +243,90 @@ export const api = {
       }),
   },
 
+  // --- active agents (cross-cutting: prd/audit dispatches, DB-only) ---
+  activeAgents: {
+    list: () => request<{ dispatches: ActiveDispatch[] }>("/active-agents"),
+  },
+
+  // --- PRDs ---
+  prds: {
+    list: (params: { projectId: string }) =>
+      request<{ prds: PrdSummary[] }>(`/prds?projectId=${params.projectId}`),
+    get: (id: string) =>
+      request<{ prd: Prd; content: string; parse: PrdParse; activityCount: number }>(
+        `/prds/${id}`,
+      ),
+    activity: (id: string, cursor?: { before: string; beforeId: string }, limit = 60) =>
+      request<{ events: ActivityEvent[]; hasMore: boolean; workspace: string | null }>(
+        `/prds/${id}/activity?limit=${limit}` +
+          (cursor ? `&before=${encodeURIComponent(cursor.before)}&beforeId=${cursor.beforeId}` : ""),
+      ),
+    patchContent: (id: string, content: string) =>
+      request<{ ok: true }>(`/prds/${id}/content`, {
+        method: "PATCH",
+        body: JSON.stringify({ content }),
+      }),
+    answer: (id: string, questionId: string, answer: string) =>
+      request<{ ok: true }>(`/prds/${id}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ questionId, answer }),
+      }),
+    ignore: (id: string) =>
+      request<{ ok: true }>(`/prds/${id}/ignore`, { method: "POST" }),
+    unignore: (id: string) =>
+      request<{ ok: true }>(`/prds/${id}/unignore`, { method: "POST" }),
+    ignoreFolder: (projectId: string, folder: string) =>
+      request<{ ok: true; ignoredFolders: string[] }>(`/prds/ignore-folder`, {
+        method: "POST",
+        body: JSON.stringify({ projectId, folder }),
+      }),
+    dispatch: (id: string) =>
+      request<{ ok: true }>(`/prds/${id}/dispatch`, { method: "POST" }),
+    implement: (id: string) =>
+      request<{ ok: true }>(`/prds/${id}/implement`, { method: "POST" }),
+    stop: (id: string) =>
+      request<{ ok: boolean; noop?: boolean }>(`/prds/${id}/stop`, { method: "POST" }),
+  },
+
+  // --- audits (standing standards-checks) ---
+  audits: {
+    list: (params: { projectId: string }) =>
+      request<{ audits: AuditCheckSummary[] }>(`/audits?projectId=${params.projectId}`),
+    get: (id: string) =>
+      request<{
+        audit: AuditCheck;
+        prompt: string;
+        findings: AuditFinding[];
+        activity: ActivityEvent[];
+      }>(`/audits/${id}`),
+    savePrompt: (id: string, prompt: string) =>
+      request<{ ok: true }>(`/audits/${id}/prompt`, {
+        method: "PUT",
+        body: JSON.stringify({ prompt }),
+      }),
+    run: (id: string) =>
+      request<{ ok: true }>(`/audits/${id}/run`, { method: "POST" }),
+    stop: (id: string) =>
+      request<{ ok: boolean; noop?: boolean }>(`/audits/${id}/stop`, { method: "POST" }),
+    schedule: (
+      id: string,
+      body: { scheduleKind: AuditScheduleKind; scheduleTime?: string | null; scheduleDays?: number[] },
+    ) =>
+      request<{ audit: AuditCheck }>(`/audits/${id}/schedule`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    answerFinding: (fid: string, answer: string, targetPrdRelPath?: string) =>
+      request<{ ok: true }>(`/audits/findings/${fid}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ answer, ...(targetPrdRelPath ? { targetPrdRelPath } : {}) }),
+      }),
+    resolveFinding: (fid: string) =>
+      request<{ ok: true }>(`/audits/findings/${fid}/resolve`, { method: "POST" }),
+    dismissFinding: (fid: string) =>
+      request<{ ok: true }>(`/audits/findings/${fid}/dismiss`, { method: "POST" }),
+  },
+
   // --- refinement Q&A ---
   refinementQuestions: {
     list: (params: { projectId?: string; includeAnswered?: boolean } = {}) => {
@@ -295,6 +397,7 @@ export const api = {
           maxConcurrentTotal: number;
           maxConcurrentQa: number;
           maxConcurrentSpecWriter: number;
+          maxConcurrentAudit: number;
         };
       }>("/settings"),
     patch: (body: {
@@ -303,6 +406,7 @@ export const api = {
         maxConcurrentTotal?: number;
         maxConcurrentQa?: number;
         maxConcurrentSpecWriter?: number;
+        maxConcurrentAudit?: number;
       };
     }) =>
       request<{
@@ -311,6 +415,7 @@ export const api = {
           maxConcurrentTotal: number;
           maxConcurrentQa: number;
           maxConcurrentSpecWriter: number;
+          maxConcurrentAudit: number;
         };
       }>("/settings", {
         method: "PATCH",
@@ -373,7 +478,7 @@ export const api = {
 
 export interface AgentInvocation {
   id: string;
-  storyId: string;
+  storyId: string | null;
   agent: string;
   promptAt: string;
   prompt: string;

@@ -15,7 +15,11 @@ export type AgentName =
   | "explorer"
   | "classifier"
   | "compactor"
-  | "auditor";
+  | "auditor"
+  // PRD/audit pipeline (disconnected from the story pipeline):
+  | "drafter"
+  | "full-stack-engineer"
+  | "audit-runner";
 
 export interface Agent {
   id: string;

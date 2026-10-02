@@ -15,6 +15,12 @@ export const projects = pgTable("projects", {
   capabilities: jsonb("capabilities").$type<string[]>().notNull().default([]),
   serverConfig: jsonb("server_config").$type<import("@orca/shared").ServerConfig | null>().default(null),
   context: text("context"),
+  // Folder paths (relative to repo root) the user has chosen to exclude from
+  // the PRDs section, on top of the hard-coded junk-dir excludes.
+  prdIgnoredFolders: jsonb("prd_ignored_folders")
+    .$type<string[]>()
+    .notNull()
+    .default([]),
   heartbeatDefaultIntervalMs: integer("heartbeat_default_interval_ms")
     .notNull()
     .default(5 * 60 * 1000), // 5 minutes per the spec

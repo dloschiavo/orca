@@ -23,6 +23,7 @@ export function SettingsPage() {
   const [maxTotal, setMaxTotal] = useState<string>("");
   const [maxQa, setMaxQa] = useState<string>("");
   const [maxSpecWriter, setMaxSpecWriter] = useState<string>("");
+  const [maxAudit, setMaxAudit] = useState<string>("");
   const [initialized, setInitialized] = useState(false);
 
   useEffect(() => {
@@ -31,33 +32,40 @@ export function SettingsPage() {
       setMaxTotal(String(data.throttle.maxConcurrentTotal));
       setMaxQa(String(data.throttle.maxConcurrentQa));
       setMaxSpecWriter(String(data.throttle.maxConcurrentSpecWriter));
+      setMaxAudit(String(data.throttle.maxConcurrentAudit));
       setInitialized(true);
     }
   }, [data, initialized]);
 
   function handlePerProjectBlur() {
     const n = parseInt(maxPerProject, 10);
-    if (isNaN(n) || n < 1) { setMaxPerProject(String(data?.throttle.maxConcurrentPerProject ?? 2)); return; }
+    if (isNaN(n) || n < 0) { setMaxPerProject(String(data?.throttle.maxConcurrentPerProject ?? 2)); return; }
     if (n === data?.throttle.maxConcurrentPerProject) return;
     patchMut.mutate({ throttle: { maxConcurrentPerProject: n } });
   }
   function handleTotalBlur() {
     const n = parseInt(maxTotal, 10);
-    if (isNaN(n) || n < 1) { setMaxTotal(String(data?.throttle.maxConcurrentTotal ?? 3)); return; }
+    if (isNaN(n) || n < 0) { setMaxTotal(String(data?.throttle.maxConcurrentTotal ?? 3)); return; }
     if (n === data?.throttle.maxConcurrentTotal) return;
     patchMut.mutate({ throttle: { maxConcurrentTotal: n } });
   }
   function handleQaBlur() {
     const n = parseInt(maxQa, 10);
-    if (isNaN(n) || n < 1) { setMaxQa(String(data?.throttle.maxConcurrentQa ?? 2)); return; }
+    if (isNaN(n) || n < 0) { setMaxQa(String(data?.throttle.maxConcurrentQa ?? 2)); return; }
     if (n === data?.throttle.maxConcurrentQa) return;
     patchMut.mutate({ throttle: { maxConcurrentQa: n } });
   }
   function handleSpecWriterBlur() {
     const n = parseInt(maxSpecWriter, 10);
-    if (isNaN(n) || n < 1) { setMaxSpecWriter(String(data?.throttle.maxConcurrentSpecWriter ?? 4)); return; }
+    if (isNaN(n) || n < 0) { setMaxSpecWriter(String(data?.throttle.maxConcurrentSpecWriter ?? 4)); return; }
     if (n === data?.throttle.maxConcurrentSpecWriter) return;
     patchMut.mutate({ throttle: { maxConcurrentSpecWriter: n } });
+  }
+  function handleAuditBlur() {
+    const n = parseInt(maxAudit, 10);
+    if (isNaN(n) || n < 0) { setMaxAudit(String(data?.throttle.maxConcurrentAudit ?? 2)); return; }
+    if (n === data?.throttle.maxConcurrentAudit) return;
+    patchMut.mutate({ throttle: { maxConcurrentAudit: n } });
   }
 
   return (
@@ -74,21 +82,21 @@ export function SettingsPage() {
               <span className="adm-section-rule" />
             </div>
             <p className="adm-section-hint">
-              Limits how many stories the heartbeat dispatches concurrently.
+              Limits how many agents the heartbeat dispatches concurrently.
               Changes take effect on the next heartbeat tick.
             </p>
 
             <div className="adm-rows">
               <ThrottleRow
                 name="per-project"
-                hint="impl-pipeline dispatches per project"
+                hint="impl-pipeline code agents per project — story frontend/backend + PRD implement + audit fix"
                 value={maxPerProject}
                 onChange={setMaxPerProject}
                 onCommit={handlePerProjectBlur}
               />
               <ThrottleRow
                 name="total"
-                hint="impl-pipeline dispatches across all projects"
+                hint="impl-pipeline code agents across all projects — story frontend/backend + PRD implement + audit fix"
                 value={maxTotal}
                 onChange={setMaxTotal}
                 onCommit={handleTotalBlur}
@@ -102,10 +110,17 @@ export function SettingsPage() {
               />
               <ThrottleRow
                 name="spec-writer"
-                hint="spec-writer agents platform-wide (independent cap)"
+                hint="spec-writer + PRD drafter agents platform-wide"
                 value={maxSpecWriter}
                 onChange={setMaxSpecWriter}
                 onCommit={handleSpecWriterBlur}
+              />
+              <ThrottleRow
+                name="audit-runner"
+                hint="read-only audit scans platform-wide (independent cap)"
+                value={maxAudit}
+                onChange={setMaxAudit}
+                onCommit={handleAuditBlur}
               />
             </div>
 
@@ -139,7 +154,7 @@ function ThrottleRow({
       <div className="adm-row-aux">
         <input
           type="number"
-          min={1}
+          min={0}
           value={value}
           onChange={(e) => onChange(e.target.value)}
           onBlur={onCommit}

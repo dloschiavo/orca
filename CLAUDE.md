@@ -8,15 +8,17 @@ When finishing changes, you MUST verify there is no 500 ISE.
 
 Backend (port 4455):
 ```bash
-lsof -ti:4455 | xargs kill -9 2>/dev/null || true
+lsof -ti TCP:4455 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
 pnpm --filter @orca/server dev &>/tmp/orca-server.log &
 ```
 
 Frontend / Vite (port 5173):
 ```bash
-lsof -ti:5173 | xargs kill -9 2>/dev/null || true
+lsof -ti TCP:5173 -sTCP:LISTEN | xargs kill -9 2>/dev/null || true
 pnpm --filter @orca/web dev &>/tmp/orca-web.log &
 ```
+
+The `-sTCP:LISTEN` filter matters: a bare `lsof -ti:4455` also matches processes holding *established connections* to that port — Vite's API proxy usually has one open to the backend, so the unfiltered kill takes the frontend down with it (this happened 2026-06-11).
 
 Wait for the server to be reachable (`curl -s http://localhost:4455/health`) before declaring the task done.
 

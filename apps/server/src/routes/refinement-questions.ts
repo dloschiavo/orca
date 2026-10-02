@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { schema } from "@orca/db";
+import { sanitizeForJsonb } from "../services/sanitize-jsonb.js";
 import type { OrcaEnv } from "../app.js";
 import type { OrcaDb } from "@orca/db";
 import type { StoryStatus } from "@orca/shared";
@@ -82,10 +83,10 @@ async function maybeRedispatchSpecWriter(
       storyId,
       kind: "comment",
       actor: "system",
-      payload: {
+      payload: sanitizeForJsonb({
         body: `Auto-redispatch suppressed: this story has already had ${answeredCount} refinement-question rounds. Click **Re-spec** to manually trigger another spec-writer pass, or update the spec body directly. The agent has had enough chances to atomize; further questions are unlikely to converge.`,
         source: "anti-loop-cap",
-      },
+      }),
     });
     return;
   }
@@ -131,13 +132,13 @@ async function maybeRedispatchSpecWriter(
     storyId,
     kind: "dispatch_started",
     actor: "system",
-    payload: {
+    payload: sanitizeForJsonb({
       repoPath: project.repoPath,
       adapter: "claude-local",
       trigger: "answer-redispatch",
       agent: "spec-writer",
       ...(resolvedModel ? { model: resolvedModel } : {}),
-    },
+    }),
   });
 
   runClaudeDispatch({
@@ -260,11 +261,11 @@ export function refinementQuestionsRoutes(): Hono<OrcaEnv> {
       storyId: updated.storyId,
       kind: "comment",
       actor: "user",
-      payload: {
+      payload: sanitizeForJsonb({
         body: `**Q:** ${updated.question}\n\n**A:** ${body.answer}`,
         source: "refinement-answer",
         questionId: updated.id,
-      },
+      }),
     });
 
     // Fire-and-forget: the auto-dispatch is best-effort, don't block the

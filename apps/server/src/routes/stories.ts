@@ -7,6 +7,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { and, desc, eq, isNotNull, max, sql } from "drizzle-orm";
 import { schema } from "@orca/db";
+import { sanitizeForJsonb } from "../services/sanitize-jsonb.js";
 import { z } from "zod";
 import type { StoryStatus } from "@orca/shared";
 import type { OrcaEnv } from "../app.js";
@@ -18,12 +19,27 @@ import { enforceStoryTokenBudget } from "../services/token-budget.js";
 import { isConcurrencyExceeded, countClaudeProcesses, getConcurrencyCap, recordRateLimit, isRateLimited, getRateLimitInfo, recordUsageFraction, persistUsageFraction, extractUsageFraction } from "../services/concurrency.js";
 import { extractModelFromStreamResult, extractModelFromCliWrapper } from "../services/token-usage.js";
 import { handleDispatchRejection } from "../services/dispatch-rejection.js";
+import { ensureFreshOAuthToken, refreshClaudeOAuthToken } from "../services/claude-oauth.js";
 import { storyEvents } from "../services/story-events.js";
 import { isPidAlive } from "../services/pid.js";
+import {
+  listChangedFiles,
+  snapshotWorkingTree,
+  captureGitDiff,
+  getHeadSha,
+  captureCommittedDiff,
+  synthDiffForNewFiles,
+} from "../services/dispatch-git.js";
 
 // CLAUDE_BIN is written to apps/server/.env.local by setup-env.ts (runs on
 // postinstall / predev) and loaded into process.env by index.ts before main().
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
+
+// Consecutive 401-failed dispatches before a story is blocked instead of
+// retried. The first strike already triggers a token refresh, so by strike
+// 2 the retry should be running on fresh credentials — three strikes means
+// the refresh itself is failing and a human needs to `claude auth login`.
+const MAX_AUTH_FAILURES = 3;
 
 // Track running agent processes so we can interrupt them when a story is edited
 // mid-dispatch. Key = storyId.
@@ -339,7 +355,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       storyId: story.id,
       kind: "story_created",
       actor: "user",
-      payload: { title: story.title },
+      payload: sanitizeForJsonb({ title: story.title }),
     });
 
     const createdJson = c.json({ story }, 201);
@@ -827,7 +843,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         storyId: id,
         kind: "state_transition",
         actor: eventActor,
-        payload: { status: body.status },
+        payload: sanitizeForJsonb({ status: body.status }),
       });
     }
 
@@ -839,7 +855,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         storyId: id,
         kind: "agent_transition",
         actor: eventActor,
-        payload: { from: current.agent, to: body.agent },
+        payload: sanitizeForJsonb({ from: current.agent, to: body.agent }),
       });
     }
 
@@ -911,14 +927,14 @@ export function storiesRoutes(): Hono<OrcaEnv> {
         storyId: id,
         kind: "story_edited",
         actor: eventActor,
-        payload: {
+        payload: sanitizeForJsonb({
           ...(titleChanged
             ? { titleFrom: current.title, titleTo: body.title }
             : {}),
           ...(specChanged
             ? { specFrom: current.specMd, specTo: body.specMd }
             : {}),
-        },
+        }),
       });
     }
 
@@ -948,11 +964,11 @@ export function storiesRoutes(): Hono<OrcaEnv> {
           storyId: id,
           kind: "dispatch_interrupted",
           actor: "system",
-          payload: {
+          payload: sanitizeForJsonb({
             reason: "story_edited",
             titleChanged,
             specChanged,
-          },
+          }),
         });
 
         // Build a change summary for the agent.
@@ -1033,14 +1049,14 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       storyId: id,
       kind: "dispatch_interrupted",
       actor: "user",
-      payload: { reason: "manual_stop" },
+      payload: sanitizeForJsonb({ reason: "manual_stop" }),
     });
 
     await db.insert(schema.activityEvents).values({
       storyId: id,
       kind: "state_transition",
       actor: "user",
-      payload: { status: "blocked", from: previousStatus, reason: "manual_stop" },
+      payload: sanitizeForJsonb({ status: "blocked", from: previousStatus, reason: "manual_stop" }),
     });
 
     return c.json({ ok: true });
@@ -1105,7 +1121,7 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       storyId: id,
       kind: "comment",
       actor,
-      payload: { body: commentBody, interrupt, acknowledged: false },
+      payload: sanitizeForJsonb({ body: commentBody, interrupt, acknowledged: false }),
     });
 
     if (interrupt) {
@@ -1129,13 +1145,13 @@ export function storiesRoutes(): Hono<OrcaEnv> {
           storyId: id,
           kind: "dispatch_interrupted",
           actor: "user",
-          payload: { reason: "comment_interrupt" },
+          payload: sanitizeForJsonb({ reason: "comment_interrupt" }),
         });
         await db.insert(schema.activityEvents).values({
           storyId: id,
           kind: "state_transition",
           actor: "user",
-          payload: { status: "backlog", from: "implementing", reason: "comment_interrupt" },
+          payload: sanitizeForJsonb({ status: "backlog", from: "implementing", reason: "comment_interrupt" }),
         });
       }
     }
@@ -1226,13 +1242,13 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       storyId: id,
       kind: "dispatch_started",
       actor: "system",
-      payload: {
+      payload: sanitizeForJsonb({
         repoPath: project.repoPath,
         adapter: "claude-local",
         trigger: "manual",
         agent: story.agent,
         ...(resolvedModel ? { model: resolvedModel } : {}),
-      },
+      }),
     });
 
     runClaudeDispatch({
@@ -1310,13 +1326,13 @@ export function storiesRoutes(): Hono<OrcaEnv> {
       storyId: id,
       kind: "dispatch_started",
       actor: "system",
-      payload: {
+      payload: sanitizeForJsonb({
         repoPath: project.repoPath,
         adapter: "claude-local",
         trigger: "wake",
         agent: story.agent,
         ...(resolvedModel ? { model: resolvedModel } : {}),
-      },
+      }),
     });
 
     runClaudeDispatch({
@@ -1431,11 +1447,11 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
       storyId,
       kind: "dispatch_claim",
       actor: "system",
-      payload: {
+      payload: sanitizeForJsonb({
         instanceId: dispatchInstanceId,
         adopt: Boolean(adoptExistingPid),
         ...(trigger ? { trigger } : {}),
-      },
+      }),
       dispatchInstanceId,
     })
     .returning({ createdAt: schema.activityEvents.createdAt });
@@ -1525,12 +1541,12 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
         storyId,
         kind: "dispatch_failed",
         actor: "system",
-        payload: {
+        payload: sanitizeForJsonb({
           reason: "ghost_cleanup",
           ghostInstanceId: g.instanceId,
           ghostPid: g.pid,
           sweptBy: dispatchInstanceId,
-        },
+        }),
         dispatchInstanceId: g.instanceId,
       })),
     );
@@ -1541,12 +1557,12 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
       storyId,
       kind: "dispatch_dropped",
       actor: "system",
-      payload: {
+      payload: sanitizeForJsonb({
         reason: "another_active_dispatch",
         instanceId: dispatchInstanceId,
         ...(trigger ? { trigger } : {}),
         adopt: Boolean(adoptExistingPid),
-      },
+      }),
       dispatchInstanceId,
     });
     // Revert the caller's optimistic implementing transition so the row is
@@ -1571,11 +1587,11 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
           storyId,
           kind: "state_transition",
           actor: "system",
-          payload: {
+          payload: sanitizeForJsonb({
             status: revertStatusOnDrop,
             from: "implementing",
             reason: "dispatch_dropped_revert",
-          },
+          }),
           dispatchInstanceId,
         });
       }
@@ -1610,9 +1626,9 @@ export async function runClaudeDispatch(args: DispatchArgs): Promise<void> {
       storyId,
       kind: "dispatch_failed",
       actor: "system",
-      payload: {
+      payload: sanitizeForJsonb({
         reason: `agent "${storyAgent}" is not registered — set a valid agent before dispatching`,
-      },
+      }),
     });
     return;
   }
@@ -2013,12 +2029,12 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
         storyId,
         kind: "dispatch_interrupted",
         actor: "system",
-        payload: {
+        payload: sanitizeForJsonb({
           reason: "system_prompt_changed",
           previousSessionId: existingSessionId,
           previousSystemPromptHash: storedSystemPromptHash.slice(0, 12),
           currentSystemPromptHash: systemPromptHash.slice(0, 12),
-        },
+        }),
       });
     } catch (err) {
       console.error("[orca] failed to log system_prompt_changed event:", err);
@@ -2073,7 +2089,7 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
         storyId,
         kind,
         actor,
-        payload,
+        payload: sanitizeForJsonb(payload),
         dispatchInstanceId,
       });
     } catch (err) {
@@ -2128,6 +2144,12 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     // agent default beats the CLI default. Passed via ANTHROPIC_MODEL
     // env var rather than --model flag for cross-CLI-version stability.
     const doerModel = await resolveModelForStory(db, storyId);
+
+    // Pre-flight: refresh the CLI's stored OAuth token if it's expired or
+    // about to expire. A spawn with a stale token burns a full dispatch
+    // cycle on a guaranteed 401. No-op for env-key/host-managed setups.
+    await ensureFreshOAuthToken();
+
     const doerEnv: NodeJS.ProcessEnv = { ...process.env };
     if (doerModel) doerEnv.ANTHROPIC_MODEL = doerModel;
 
@@ -2408,6 +2430,12 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   // dispatch even when the result event echoed back a session_id (which
   // would otherwise mask the failure as a "successful" run).
   let resumeStartFailed = false;
+  // Set when the run died on an API auth failure (401). The CLI exits 0
+  // with an error-shaped result event in this case, so without this flag
+  // the run is indistinguishable from a clean completion downstream — and
+  // the heartbeat would respawn a doomed CLI every tick, silently, forever
+  // (observed 2026-06-11: ~90 consecutive 401 retries on one story).
+  let authFailureDetected = false;
   // Prompt-cache accounting, captured from the CLI's result event. Hoisted
   // out of the per-line handler so dispatch_completed can report them —
   // high cacheReadInputTokens relative to uncached inputTokens is the
@@ -2579,6 +2607,29 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
     // The CLI has used several field names across versions — check all known
     // variants so we don't silently miss the data.
     const m = msg as Record<string, unknown>;
+
+    // Detect API auth failures (401) anywhere in the stream. The CLI tags
+    // them on api_retry system events (error_status: 401), on the synthetic
+    // assistant turn it emits after giving up (error: "authentication_failed"),
+    // and on the result event (api_error_status: 401). Note the 401s land on
+    // STDOUT as stream-json — the stderr self-heal below never sees them.
+    // First sighting kicks off a token refresh so the next heartbeat retry
+    // runs with working credentials, and flags the run so completion is
+    // counted as a strike instead of a clean finish.
+    if (
+      !authFailureDetected &&
+      (m.error === "authentication_failed" ||
+        m.error_status === 401 ||
+        m.api_error_status === 401)
+    ) {
+      authFailureDetected = true;
+      void refreshClaudeOAuthToken(`stream-401 story=${storyId}`);
+      await logEvent("auth_error_self_heal", {
+        source: "stream-json",
+        refreshTriggered: true,
+      });
+    }
+
     if (m.type === "result") {
       // Detect a --resume that errored out before producing any turn.
       // The CLI still emits a result event with the session_id we passed
@@ -2728,14 +2779,19 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
           /API Error:\s*401/i.test(line))
       ) {
         authErrorSelfHealed = true;
+        authFailureDetected = true;
         const hadEnvToken = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
         if (hadEnvToken) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+        // Clearing a stale env token only helps when one was set; the usual
+        // culprit is the CLI's stored OAuth pair going stale, so refresh it.
+        void refreshClaudeOAuthToken(`stderr-401 story=${storyId}`);
         console.warn(
-          `[orca] auth error detected (stderr) for story ${storyId}; clearedEnvToken=${hadEnvToken} — next claude spawn will use keychain creds`,
+          `[orca] auth error detected (stderr) for story ${storyId}; clearedEnvToken=${hadEnvToken} — refreshing stored OAuth token`,
         );
         await logEvent("auth_error_self_heal", {
           stderrLine: line.slice(0, 500),
           clearedEnvToken: hadEnvToken,
+          refreshTriggered: true,
         });
       }
 
@@ -2988,11 +3044,15 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
   // A clean dispatch completion clears any prior fail-count: those strikes
   // were either transient or caused by the now-fixed wake-drop wedge, and
   // letting them accumulate forever causes the next stale tick to falsely
-  // block a story that's actually been making progress.
-  await db
-    .update(schema.stories)
-    .set({ dispatchFailCount: 0 })
-    .where(eq(schema.stories.id, storyId));
+  // block a story that's actually been making progress. An auth-failed run
+  // is NOT clean — it exits 0 with an error result — so it keeps (and below
+  // increments) its strikes instead.
+  if (!authFailureDetected) {
+    await db
+      .update(schema.stories)
+      .set({ dispatchFailCount: 0 })
+      .where(eq(schema.stories.id, storyId));
+  }
 
   await logEvent("dispatch_completed", {
     exitCode,
@@ -3053,6 +3113,61 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
       ? { totalTokensUsed: (currentStory?.totalTokensUsed ?? 0) + totalTokensUsed }
       : {}),
   };
+
+  // Path 0.5: the run died on API auth (401). Count a strike; block after
+  // MAX_AUTH_FAILURES consecutive ones. Strikes below the cap just clear
+  // the dispatch tracking and leave the story where it is — the stream
+  // self-heal already kicked off a token refresh, so the next heartbeat
+  // tick retries on fresh credentials. Checked before the resume fallback
+  // because retrying without --resume can't fix dead credentials.
+  if (authFailureDetected) {
+    const [cur] = await db
+      .select({ dispatchFailCount: schema.stories.dispatchFailCount })
+      .from(schema.stories)
+      .where(eq(schema.stories.id, storyId));
+    const strikes = (cur?.dispatchFailCount ?? 0) + 1;
+    if (strikes >= MAX_AUTH_FAILURES) {
+      console.warn(
+        `[orca] story ${storyId} hit ${strikes} consecutive auth failures — blocking`,
+      );
+      await db
+        .update(schema.stories)
+        .set({
+          status: "blocked" as StoryStatus,
+          dispatchPid: null,
+          dispatchState: null,
+          dispatchFailCount: strikes,
+          blockedReason:
+            `Claude CLI authentication failed (401) on ${strikes} consecutive dispatches and automatic token refresh did not recover — run \`claude auth login\`, then unblock this story`,
+          updatedAt: new Date(),
+          ...costSnapshot,
+        })
+        .where(eq(schema.stories.id, storyId));
+      await db.insert(schema.activityEvents).values({
+        storyId,
+        kind: "state_transition",
+        actor: "system",
+        payload: sanitizeForJsonb({ status: "blocked", reason: "auth_failed_401", strikes }),
+      });
+    } else {
+      await db
+        .update(schema.stories)
+        .set({
+          dispatchPid: null,
+          dispatchState: null,
+          dispatchFailCount: strikes,
+          updatedAt: new Date(),
+          ...costSnapshot,
+        })
+        .where(eq(schema.stories.id, storyId));
+      await logEvent("dispatch_interrupted", {
+        reason: "auth_failed_401",
+        strikes,
+        maxStrikes: MAX_AUTH_FAILURES,
+      }, "system");
+    }
+    return;
+  }
 
   // Path 0: --resume failed (session not found / CLI doesn't support it).
   // Two failure modes:
@@ -3119,12 +3234,12 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
       storyId,
       kind: "state_transition",
       actor: "system",
-      payload: {
+      payload: sanitizeForJsonb({
         status: "blocked",
         reason: "token_budget_exceeded",
         spent: budgetCheck.spent,
         budget: budgetCheck.budget,
-      },
+      }),
     });
     return;
   }
@@ -3156,162 +3271,6 @@ curl -s -X POST ${orcaApiUrl}/api/stories \\
 // List every regular file under `cwd` whose mtime is newer than `marker`.
 // Skip noisy/huge trees (node_modules, .git, build outputs) so the response
 // payload stays bounded on a real codebase.
-async function listChangedFiles(
-  cwd: string,
-  marker: string,
-): Promise<string[]> {
-  return new Promise((resolve) => {
-    const child = spawn(
-      "find",
-      [
-        ".",
-        "-type",
-        "f",
-        "-newer",
-        marker,
-        "-not",
-        "-path",
-        "*/node_modules/*",
-        "-not",
-        "-path",
-        "*/.git/*",
-        "-not",
-        "-path",
-        "*/dist/*",
-        "-not",
-        "-path",
-        "*/.next/*",
-        "-not",
-        "-path",
-        "*/build/*",
-        "-not",
-        "-path",
-        "*/logs/*",
-        "-not",
-        "-name",
-        "*.log",
-        "-not",
-        "-name",
-        ".env",
-        "-not",
-        "-name",
-        ".env.*",
-      ],
-      { cwd },
-    );
-    let out = "";
-    child.stdout.on("data", (c) => (out += c.toString("utf8")));
-    child.on("close", () => {
-      const files = out
-        .split("\n")
-        .map((f) => f.replace(/^\.\//, "").trim())
-        .filter(Boolean)
-        .slice(0, 500);
-      resolve(files);
-    });
-    child.on("error", () => resolve([]));
-  });
-}
-
-
-/**
- * Snapshot the current working-tree state by creating a temporary stash
- * commit (git stash create). This does NOT modify the working directory or
- * index — it only creates a dangling commit object we can diff against
- * later. Returns the commit SHA, or null if there are no uncommitted
- * changes or this isn't a git repo.
- */
-async function snapshotWorkingTree(cwd: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const child = spawn("git", ["stash", "create"], { cwd });
-    let out = "";
-    child.stdout.on("data", (c) => (out += c.toString("utf8")));
-    child.on("close", (code) => {
-      const sha = out.trim();
-      resolve(code === 0 && sha.length > 0 ? sha : null);
-    });
-    child.on("error", () => resolve(null));
-  });
-}
-
-/**
- * Capture a git diff for this dispatch session. When `baseRef` is provided
- * (a stash commit from before the agent ran), we diff that commit against
- * the current working tree so we capture only the changes the agent made
- * in this session, not the accumulated changes from prior runs. Falls back
- * to `git diff HEAD` when no baseline is available (first run, or non-git
- * directory).
- */
-async function captureGitDiff(
-  cwd: string,
-  baseRef?: string | null,
-): Promise<string> {
-  return new Promise((resolve) => {
-    // When we have a pre-dispatch snapshot, diff it against the current
-    // working tree. Otherwise fall back to `git diff HEAD`.
-    const args = baseRef
-      ? ["diff", baseRef, "--no-color"]
-      : ["diff", "HEAD", "--no-color"];
-    const child = spawn("git", args, { cwd });
-    let out = "";
-    child.stdout.on("data", (c) => (out += c.toString("utf8")));
-    child.on("close", (code) => resolve(code === 0 ? out : ""));
-    child.on("error", () => resolve(""));
-  });
-}
-
-/** Return the current HEAD commit SHA, or null if not a git repo. */
-async function getHeadSha(cwd: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const child = spawn("git", ["rev-parse", "HEAD"], { cwd });
-    let out = "";
-    child.stdout.on("data", (c) => (out += c.toString("utf8")));
-    child.on("close", (code) => {
-      const sha = out.trim();
-      resolve(code === 0 && sha.length > 0 ? sha : null);
-    });
-    child.on("error", () => resolve(null));
-  });
-}
-
-/** Diff committed changes between two refs (e.g. pre-dispatch HEAD vs current HEAD). */
-async function captureCommittedDiff(
-  cwd: string,
-  fromRef: string,
-): Promise<string> {
-  return new Promise((resolve) => {
-    const child = spawn("git", ["diff", fromRef, "HEAD", "--no-color"], { cwd });
-    let out = "";
-    child.stdout.on("data", (c) => (out += c.toString("utf8")));
-    child.on("close", (code) => resolve(code === 0 ? out : ""));
-    child.on("error", () => resolve(""));
-  });
-}
-
-/**
- * Generate synthetic diffs for repos with no commits by diffing /dev/null
- * against each file. This produces standard unified diff output so
- * parseDiffStats in the frontend can extract line counts.
- */
-async function synthDiffForNewFiles(
-  cwd: string,
-  files: string[],
-): Promise<string> {
-  const parts: string[] = [];
-  for (const f of files) {
-    const d = await new Promise<string>((resolve) => {
-      const child = spawn(
-        "git",
-        ["diff", "--no-index", "--no-color", "/dev/null", f],
-        { cwd },
-      );
-      let out = "";
-      child.stdout.on("data", (c) => (out += c.toString("utf8")));
-      // git diff --no-index exits 1 when files differ (not an error)
-      child.on("close", () => resolve(out));
-      child.on("error", () => resolve(""));
-    });
-    if (d) parts.push(d);
-  }
-  return parts.join("\n");
-}
+// listChangedFiles / snapshotWorkingTree / captureGitDiff / getHeadSha /
+// captureCommittedDiff / synthDiffForNewFiles now live in
+// services/dispatch-git.ts (shared with runCliDispatch) and are imported above.

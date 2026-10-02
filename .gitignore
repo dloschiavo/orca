@@ -13,3 +13,6 @@ pgdata
 *.tsbuildinfo
 **/.claude/worktrees/
 **/.claude/settings.local.json
+
+# ad-hoc scratch query scripts
+apps/server/tmp-*.mjs

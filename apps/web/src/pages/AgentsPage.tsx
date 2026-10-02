@@ -662,16 +662,26 @@ function InvocationRow({
       >
         {ts.toLocaleDateString()} {ts.toLocaleTimeString()}
       </span>
-      <a
-        href={`/stories/${inv.storyId}`}
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          fontFamily: "var(--mono)", fontSize: 11,
-          color: "var(--ag-impl)", textDecoration: "none",
-        }}
-      >
-        {inv.storyId.slice(0, 8)}
-      </a>
+      {inv.storyId ? (
+        <a
+          href={`/stories/${inv.storyId}`}
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            fontFamily: "var(--mono)", fontSize: 11,
+            color: "var(--ag-impl)", textDecoration: "none",
+          }}
+        >
+          {inv.storyId.slice(0, 8)}
+        </a>
+      ) : (
+        <span
+          style={{
+            fontFamily: "var(--mono)", fontSize: 11, color: "var(--fg-3)",
+          }}
+        >
+          project
+        </span>
+      )}
       {result && <span className={resultClass(result)}>{result}</span>}
       {isTimedOut && !result && (
         <span className="adm-tag adm-tag-error">timed out</span>
