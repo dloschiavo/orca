@@ -66,6 +66,10 @@ function AppShell() {
               an in-flight new-story modal or comment draft gets wiped the
               moment auto-select fires. */}
           <Route path="/stories/:id?" element={<StoriesWorkspacePage />} />
+          {/* PRDs + Audits share the same workspace shell (3-section list pane);
+              the route base selects which detail panel renders on the right. */}
+          <Route path="/prds/:id?" element={<StoriesWorkspacePage />} />
+          <Route path="/audits/:id?" element={<StoriesWorkspacePage />} />
           <Route path="/refinement-qa" element={<ScrollPage><RefinementQAPage /></ScrollPage>} />
           <Route path="/findings" element={<ScrollPage><FindingsPage /></ScrollPage>} />
           <Route path="/triggers" element={<ScrollPage><TriggersPage /></ScrollPage>} />

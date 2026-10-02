@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { and, eq } from "drizzle-orm";
 import { schema } from "@orca/db";
+import { sanitizeForJsonb } from "../services/sanitize-jsonb.js";
 import { z } from "zod";
 import type { AuditStatus } from "@orca/shared";
 import type { OrcaEnv } from "../app.js";
@@ -123,11 +124,11 @@ export function auditRoutes(): Hono<OrcaEnv> {
       storyId: story.id,
       kind: "story_created",
       actor: "auditor",
-      payload: {
+      payload: sanitizeForJsonb({
         title: story.title,
         auditRowId: id,
         concernSlug: row.concernSlug,
-      },
+      }),
     });
 
     return c.json({ ok: true, storyId: story.id, message: "audit story created" }, 202);

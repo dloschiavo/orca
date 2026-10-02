@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface HealthResponse {
   claudeLoggedIn: boolean;
@@ -6,21 +6,37 @@ interface HealthResponse {
 
 export function ClaudeAuthGate({ children }: { children: React.ReactNode }) {
   const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
+  // Lets the "Recheck" button trigger the same in-place poll the interval runs,
+  // WITHOUT reloading the page (a reload was blowing away in-progress work).
+  const recheckRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     let cancelled = false;
+    // Require two consecutive negative reads before flipping the banner on. A
+    // single transient /health hiccup (slow response, brief unreachability)
+    // must never blank the page — the auth state genuinely changing will
+    // persist across polls, a blip won't.
+    let negativeStreak = 0;
 
     async function check() {
       try {
         const res = await fetch("/health");
-        if (!res.ok) return;
+        if (!res.ok) return; // transient server error — leave shown state alone
         const data: HealthResponse = await res.json();
-        if (!cancelled) setLoggedIn(data.claudeLoggedIn);
+        if (cancelled) return;
+        if (data.claudeLoggedIn) {
+          negativeStreak = 0;
+          setLoggedIn(true);
+        } else {
+          negativeStreak += 1;
+          if (negativeStreak >= 2) setLoggedIn(false);
+        }
       } catch {
         // Server unreachable — don't change shown state
       }
     }
 
+    recheckRef.current = check;
     check();
     const interval = setInterval(check, 10_000);
     return () => {
@@ -41,12 +57,12 @@ export function ClaudeAuthGate({ children }: { children: React.ReactNode }) {
               <code className="bg-red-950 text-yellow-300 px-1.5 py-0.5 rounded font-mono text-xs">claude auth login</code>
               {" "}or set{" "}
               <code className="bg-red-950 text-yellow-300 px-1.5 py-0.5 rounded font-mono text-xs">ANTHROPIC_API_KEY</code>
-              , then restart the server.
+              . This banner clears on its own once the CLI is authenticated.
             </span>
           </div>
           <button
             className="shrink-0 text-red-300 hover:text-white text-sm underline"
-            onClick={() => window.location.reload()}
+            onClick={() => recheckRef.current()}
           >
             Recheck
           </button>

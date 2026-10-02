@@ -4,6 +4,7 @@ import { formatBytes, formatTokens } from "./formatters.js";
 export interface StreamBlock {
   type?: string;
   text?: string;
+  thinking?: string;
   name?: string;
   input?: Record<string, unknown>;
   is_error?: boolean;
@@ -85,6 +86,43 @@ export function eventTurnTokens(e: ActivityEvent): number {
   return 0;
 }
 
+/**
+ * Pull the model id an event ran under, so the feed can show it per-line
+ * instead of only at wrapup. Returns the raw id (may carry a `[1m]`-style
+ * variant suffix, present on init/result events but not per-turn assistant
+ * messages). Null when the event carries no model.
+ */
+export function eventModel(e: ActivityEvent): string | null {
+  const p = (e.payload ?? {}) as Record<string, unknown>;
+  const clean = (v: unknown): string | null =>
+    typeof v === "string" && v && v !== "<synthetic>" ? v : null;
+  if (e.kind === "agent_stream") {
+    const type = p.type as string | undefined;
+    if (type === "assistant") {
+      const msg = p.message as Record<string, unknown> | undefined;
+      return clean(msg?.model);
+    }
+    // The `init` system event is the first place the resolved model (with its
+    // context/variant tier) is visible.
+    if (type === "system") return clean(p.model);
+    if (type === "result") {
+      const direct = clean(p.model);
+      if (direct) return direct;
+      const mu = p.modelUsage;
+      if (mu && typeof mu === "object") {
+        const keys = Object.keys(mu as Record<string, unknown>);
+        if (keys.length) return keys.join(", ");
+      }
+      return null;
+    }
+    return null;
+  }
+  if (e.kind === "dispatch_started" || e.kind === "dispatch_completed") {
+    return clean(p.model);
+  }
+  return null;
+}
+
 function sumUsageTokens(usage: unknown): number {
   if (!usage || typeof usage !== "object") return 0;
   const u = usage as Record<string, unknown>;
@@ -109,6 +147,12 @@ export function renderStreamEvent(p: Record<string, unknown>, full = false): str
       if (c.type === "text" && typeof c.text === "string") {
         const text = full ? c.text.trim() : c.text.trim().replace(/\s+/g, " ");
         if (text) parts.push(!full && text.length > 160 ? text.slice(0, 160) + "…" : text);
+      } else if (c.type === "thinking" && typeof c.thinking === "string") {
+        // Extended-thinking turns (e.g. the drafter on opus) carry the agent's
+        // actual reasoning here, not in a text block. Without this they render
+        // as a bare "assistant" and the meaningful content is lost.
+        const t = full ? c.thinking.trim() : c.thinking.trim().replace(/\s+/g, " ");
+        if (t) parts.push(`💭 ${!full && t.length > 160 ? t.slice(0, 160) + "…" : t}`);
       } else if (c.type === "tool_use") {
         const name = c.name ?? "tool";
         const target = summarizeToolInput(c.input, full);
@@ -252,6 +296,19 @@ export function renderEvent(e: ActivityEvent, full = false): string {
     }
     case "dispatch_interrupted":
       return `agent interrupted: ${(p.reason as string) ?? "unknown"}`;
+    case "dispatch_claim": {
+      const trigger = p.trigger as string | undefined;
+      const adopt = p.adopt === true;
+      return `claimed dispatch${trigger ? ` (${trigger})` : ""}${adopt ? " · adopted running process" : ""}`;
+    }
+    case "dispatch_dropped": {
+      const reason = p.reason as string | undefined;
+      return `dispatch dropped${reason ? `: ${reason}` : ""}`;
+    }
+    case "concurrency_deferred": {
+      const trigger = p.trigger as string | undefined;
+      return `deferred${trigger ? `: ${trigger}` : ""}`;
+    }
     case "heartbeat_recovery": {
       const reason = p.reason === "stale" ? "stale process" : "dead pid";
       const pidStr = p.deadPid != null ? ` ${p.deadPid}` : "";

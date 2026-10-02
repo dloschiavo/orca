@@ -1,13 +1,17 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useLocation } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ActivityEvent, type HierarchyNode } from "../api.js";
+import { PrdList } from "./workspace/PrdList.js";
+import { AuditList } from "./workspace/AuditList.js";
+import { PrdDetailPanel } from "./workspace/PrdDetailPanel.js";
+import { AuditDetailPanel } from "./workspace/AuditDetailPanel.js";
 import type { RefinementQuestion, Story, StoryStatus } from "@orca/shared";
 import { NewStoryModal } from "../components/NewStoryModal.js";
 import { useProjectContext } from "../state/ProjectContext.js";
 import { useStoryEventStream } from "../hooks/useStoryEventStream.js";
 import { USER_LABEL, resolveAgentDisplay } from "../utils/agentStyle.js";
-import { formatElapsed, formatTokens } from "../utils/formatters.js";
+import { formatElapsed, formatTokens, formatModel } from "../utils/formatters.js";
 import {
   renderEvent,
   shortenHome,
@@ -15,6 +19,7 @@ import {
   extractContent,
   parseDiffStats,
   eventTurnTokens,
+  eventModel,
 } from "../utils/activity.js";
 import { renderMarkdown, parseInlineMarkdown, maybePrettyJson } from "../utils/markdown.js";
 import { clearDraft, loadDraft, saveDraft } from "../utils/draftStorage.js";
@@ -98,11 +103,17 @@ const LIST_WIDTH_MIN = 280;
 const LIST_WIDTH_MAX = 1200;
 const LIST_WIDTH_DEFAULT = 480;
 
+// Draggable height of the Stories panel (bottom of the list column). The
+// PRDs/Audits region above takes the remaining space.
+const STORY_HEIGHT_KEY = "orca.storyListHeight";
+const STORY_HEIGHT_MIN = 120;
+const STORY_HEIGHT_DEFAULT = 280;
+
 // ── History tab: hide-rule toggles ────────────────────────────────────────────
 // Each key represents a category of events that is hidden by default. The
 // checkbox dropdown in the History toolbar lets the user opt INTO showing
 // any of these. Default state: empty set (everything in this list hidden).
-type HistoryShowKey =
+export type HistoryShowKey =
   | "story_created"
   | "dispatch_in_workspace"
   | "dispatch_claim_dropped"
@@ -113,6 +124,7 @@ type HistoryShowKey =
   | "stream_assistant_empty"
   | "stream_assistant_tools_only"
   | "stream_spawn_notice"
+  | "stream_rate_limit"
   | "stream_hook_started"
   | "stream_hook_response"
   | "stream_api_retry"
@@ -134,6 +146,7 @@ const HISTORY_SHOW_OPTIONS: { key: HistoryShowKey; label: string }[] = [
   { key: "stream_assistant_empty", label: "Empty assistant turns" },
   { key: "stream_assistant_tools_only", label: "Assistant tool-only turns" },
   { key: "stream_spawn_notice", label: "Claude-local spawn notices" },
+  { key: "stream_rate_limit", label: "Rate-limit events" },
   { key: "stream_hook_started", label: "System: hook_started" },
   { key: "stream_hook_response", label: "System: hook_response" },
   { key: "stream_api_retry", label: "System: api_retry" },
@@ -147,7 +160,7 @@ const HISTORY_SHOW_OPTIONS: { key: HistoryShowKey; label: string }[] = [
 
 const HISTORY_SHOW_KEY = "orca.historyShowKeys";
 
-function eventVisible(
+export function eventVisible(
   e: ActivityEvent,
   show: Set<HistoryShowKey>,
   workspace: string | undefined,
@@ -209,11 +222,14 @@ function eventVisible(
     if (toolUses.length > 0 && toolUses.every((c) => isHideableToolUse(c.name ?? "", c.input, workspace))) return show.has("stream_assistant_tools_only");
     return true;
   }
+  // Rate-limit telemetry is pure noise (renders as a raw JSON blob). The old
+  // story detail pane hard-hid it; here it's hidden by default but opt-in.
+  if (type === "rate_limit_event") return show.has("stream_rate_limit");
   if (workspace && JSON.stringify(p).includes(`spawning claude-local in ${workspace}`)) return show.has("stream_spawn_notice");
   return true;
 }
 
-function useHistoryShowSet(): [Set<HistoryShowKey>, (k: HistoryShowKey, v: boolean) => void] {
+export function useHistoryShowSet(): [Set<HistoryShowKey>, (k: HistoryShowKey, v: boolean) => void] {
   const [show, setShow] = useState<Set<HistoryShowKey>>(() => {
     try {
       const raw = localStorage.getItem(HISTORY_SHOW_KEY);
@@ -238,6 +254,12 @@ function useHistoryShowSet(): [Set<HistoryShowKey>, (k: HistoryShowKey, v: boole
 
 export function StoriesWorkspacePage() {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
+  const activeKind: "story" | "prd" | "audit" = location.pathname.startsWith("/prds")
+    ? "prd"
+    : location.pathname.startsWith("/audits")
+      ? "audit"
+      : "story";
   const navigate = useNavigate();
   const { activeProjectId, activeProject } = useProjectContext();
   useStoryEventStream(activeProjectId);
@@ -249,8 +271,14 @@ export function StoriesWorkspacePage() {
       ? stored
       : LIST_WIDTH_DEFAULT;
   });
+  const [storyHeight, setStoryHeight] = useState<number>(() => {
+    const stored = Number(localStorage.getItem(STORY_HEIGHT_KEY));
+    return Number.isFinite(stored) && stored >= STORY_HEIGHT_MIN ? stored : STORY_HEIGHT_DEFAULT;
+  });
   const containerRef = useRef<HTMLDivElement>(null);
+  const listColRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const storyDragRef = useRef<{ startY: number; startHeight: number } | null>(null);
 
   const onDividerMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -281,6 +309,38 @@ export function StoriesWorkspacePage() {
   useEffect(() => {
     localStorage.setItem(LIST_WIDTH_KEY, String(listWidth));
   }, [listWidth]);
+
+  // Vertical drag of the Stories panel. Dragging the handle UP grows Stories
+  // (it sits at the bottom of the column); persisted to localStorage.
+  const onStoryDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    storyDragRef.current = { startY: e.clientY, startHeight: storyHeight };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (ev: MouseEvent) => {
+      if (!storyDragRef.current) return;
+      const colHeight = listColRef.current?.getBoundingClientRect().height ?? window.innerHeight;
+      // Keep at least ~140px for the PRDs/Audits region above.
+      const maxAllowed = Math.max(STORY_HEIGHT_MIN, colHeight - 140);
+      const delta = storyDragRef.current.startY - ev.clientY;
+      const next = Math.max(STORY_HEIGHT_MIN, Math.min(maxAllowed, storyDragRef.current.startHeight + delta));
+      setStoryHeight(next);
+    };
+    const onUp = () => {
+      storyDragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [storyHeight]);
+
+  useEffect(() => {
+    localStorage.setItem(STORY_HEIGHT_KEY, String(storyHeight));
+  }, [storyHeight]);
 
   const queryClient = useQueryClient();
 
@@ -313,15 +373,35 @@ export function StoriesWorkspacePage() {
 
   return (
     <div ref={containerRef} style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
-      <StoryList
-        activeProjectId={activeProjectId}
-        activeProject={activeProject}
-        selectedId={id ?? null}
-        filter={filter}
-        onSetFilter={setFilter}
-        onNewStory={() => setCreating(true)}
-        width={listWidth}
-      />
+      <div
+        ref={listColRef}
+        className="pane-list workspace-list"
+        style={{ flex: `0 0 ${listWidth}px`, width: `${listWidth}px`, minWidth: LIST_WIDTH_MIN }}
+      >
+        <div className="workspace-list-top">
+          <PrdList projectId={activeProjectId} selectedId={id ?? null} activeKind={activeKind} />
+          <AuditList projectId={activeProjectId} selectedId={id ?? null} activeKind={activeKind} />
+        </div>
+        <div
+          className="pane-divider-h"
+          onMouseDown={onStoryDividerMouseDown}
+          onDoubleClick={() => setStoryHeight(STORY_HEIGHT_DEFAULT)}
+          title="Drag to resize stories · double-click to reset"
+          role="separator"
+          aria-orientation="horizontal"
+        />
+        <div className="workspace-list-stories" style={{ flex: `0 0 ${storyHeight}px`, height: storyHeight }}>
+          <StoryList
+            activeProjectId={activeProjectId}
+            activeProject={activeProject}
+            selectedId={activeKind === "story" ? id ?? null : null}
+            filter={filter}
+            onSetFilter={setFilter}
+            onNewStory={() => setCreating(true)}
+            autoSelect={activeKind === "story"}
+          />
+        </div>
+      </div>
 
       <div
         className="pane-divider"
@@ -333,11 +413,15 @@ export function StoriesWorkspacePage() {
       />
 
       <div className="pane-detail" style={{ flex: "1 1 0", minWidth: 480 }}>
-        {id ? (
+        {id && activeKind === "prd" ? (
+          <PrdDetailPanel id={id} />
+        ) : id && activeKind === "audit" ? (
+          <AuditDetailPanel id={id} />
+        ) : id ? (
           <StoryDetailPanel id={id} />
         ) : (
           <div className="sd-empty">
-            select a story to see spec,<br />inline questions, and agent history
+            select a story, PRD, or audit<br />from the list on the left
           </div>
         )}
       </div>
@@ -364,10 +448,10 @@ interface StoryListProps {
   filter: "all" | "mine" | "active";
   onSetFilter: (f: "all" | "mine" | "active") => void;
   onNewStory: () => void;
-  width: number;
+  autoSelect: boolean;
 }
 
-function StoryList({ activeProjectId, activeProject, selectedId, filter, onSetFilter, onNewStory, width }: StoryListProps) {
+function StoryList({ activeProjectId, activeProject, selectedId, filter, onSetFilter, onNewStory, autoSelect }: StoryListProps) {
   const navigate = useNavigate();
 
   const { data, isLoading } = useQuery({
@@ -394,15 +478,18 @@ function StoryList({ activeProjectId, activeProject, selectedId, filter, onSetFi
     active: stories.filter((s) => s.dispatchPid != null).length,
   };
 
-  // Auto-select the first story when none is selected (e.g. on project open)
+  // Auto-select the first story when none is selected (e.g. on project open).
+  // Only when the story view is active — otherwise it would yank the user off
+  // a /prds or /audits route.
   useEffect(() => {
-    if (!selectedId && !isLoading && filtered.length > 0) {
+    if (autoSelect && !selectedId && !isLoading && filtered.length > 0) {
       navigate(`/stories/${filtered[0]!.id}`, { replace: true });
     }
-  }, [selectedId, isLoading, filtered, navigate]);
+  }, [autoSelect, selectedId, isLoading, filtered, navigate]);
 
-  // Keyboard navigation
+  // Keyboard navigation (story view only)
   useEffect(() => {
+    if (!autoSelect) return;
     const handler = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).tagName === "TEXTAREA" || (e.target as HTMLElement).tagName === "INPUT") return;
       if (e.key === "j" || e.key === "ArrowDown") {
@@ -419,14 +506,12 @@ function StoryList({ activeProjectId, activeProject, selectedId, filter, onSetFi
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [filtered, selectedId, navigate]);
-
-  const projectName = activeProject?.name ?? "…";
+  }, [autoSelect, filtered, selectedId, navigate]);
 
   return (
-    <div className="pane-list" style={{ flex: `0 0 ${width}px`, width: `${width}px`, minWidth: LIST_WIDTH_MIN }}>
+    <div className="macro-section story-section">
       <div className="pl-toolbar">
-        <span className="pl-title">{projectName}</span>
+        <span className="pl-title">Stories</span>
         <span className="pl-count">{isLoading ? "…" : `${filtered.length}/${stories.length}`}</span>
         <div className="pl-chips">
           <Chip label="all" count={counts.all} active={filter === "all"} onClick={() => onSetFilter("all")} />
@@ -1382,7 +1467,7 @@ function AnsweredQuestion({ question }: { question: RefinementQuestion }) {
 
 // ── History tab ───────────────────────────────────────────────────────────────
 
-type EventGroup =
+export type EventGroup =
   | { type: "bubble"; event: ActivityEvent; arrows: ActivityEvent[] }
   | { type: "continuing"; arrows: ActivityEvent[] }
   | { type: "other"; event: ActivityEvent };
@@ -1392,7 +1477,7 @@ const BUBBLE_KINDS = new Set([
   "agent_prompt", "triage_prompt", "qa_prompt", "classifier_prompt",
 ]);
 
-function groupActivity(events: ActivityEvent[]): EventGroup[] {
+export function groupActivity(events: ActivityEvent[]): EventGroup[] {
   const groups: EventGroup[] = [];
   let openBubble: { event: ActivityEvent; arrows: ActivityEvent[] } | null = null;
 
@@ -1425,7 +1510,7 @@ function groupActivity(events: ActivityEvent[]): EventGroup[] {
   return groups;
 }
 
-function HistoryShowDropdown({
+export function HistoryShowDropdown({
   show,
   onToggle,
   count,
@@ -1555,8 +1640,8 @@ function HistoryTab({
         }
         return (
           <HistoryEvent
-            key={g.type === "other" ? g.event.id : g.event.id}
-            event={g.type === "other" ? g.event : g.event}
+            key={g.event.id}
+            event={g.event}
             arrows={g.type === "bubble" ? g.arrows : undefined}
             forceOpen={expandAll}
             workspace={workspace}
@@ -1567,7 +1652,7 @@ function HistoryTab({
   );
 }
 
-function HistoryEvent({
+export function HistoryEvent({
   event, forceOpen, workspace, arrows, synthetic,
 }: {
   event: ActivityEvent;
@@ -1589,28 +1674,68 @@ function HistoryEvent({
   const fullLine = shortenHome(renderEvent(event, true));
   const isArrow = line.startsWith("→");
 
-  let content: string;
-  if (synthetic) {
-    content = "Continuing…";
-  } else if (event.kind === "state_transition") {
-    const p = event.payload as { status?: string };
-    content = `→ ${p.status ?? "unknown"}`;
-  } else if (event.kind === "agent_transition") {
-    const p = event.payload as { from?: string | null; to?: string | null };
-    content = `${p.from ?? "(none)"} → ${p.to ?? "(none)"}`;
-  } else if (event.kind === "comment") {
-    const p = event.payload as { body?: string };
-    content = p.body ?? "";
-  } else {
-    content = isArrow ? line.slice(2) : fullLine;
-  }
-
+  const p = (event.payload ?? {}) as Record<string, unknown>;
   const PROMPT_KINDS = ["agent_prompt", "triage_prompt", "qa_prompt", "classifier_prompt"];
   const isPromptEvent = PROMPT_KINDS.includes(event.kind);
-  const displayLine = content.length > 120 ? content.slice(0, 120) + "…" : content;
-  const hasDetail = fullLine.length > 80 || event.kind === "dispatch_completed" || isPromptEvent;
   const hasArrows = arrows && arrows.length > 0;
   const turnTokens = eventTurnTokens(event);
+  const modelRaw = eventModel(event);
+  const model = modelRaw ? formatModel(modelRaw) : null;
+
+  // Full-fidelity body rendering (markdown bubbles, colored transitions, etc.)
+  // ported from the old story detail pane. `detailNode`, when present, is the
+  // expandable packet (system prompt, changed files, raw blob).
+  let bodyNode: React.ReactNode;
+  let detailNode: React.ReactNode = null;
+
+  if (event.kind === "comment") {
+    bodyNode = (
+      <>
+        {p.interrupt ? (
+          <span style={{ color: "var(--attn-high)", fontSize: 11, marginRight: 6 }}>⚡ interrupt</span>
+        ) : null}
+        {renderMarkdown(maybePrettyJson(String(p.body ?? "")))}
+      </>
+    );
+  } else if (isPromptEvent) {
+    const targetAgent = (p.agent ?? event.actor ?? "") as string;
+    const promptBody = (p.prompt ?? p.body ?? "") as string;
+    const systemPrompt = (p.systemPrompt ?? "") as string;
+    bodyNode = renderMarkdown(maybePrettyJson(`@${targetAgent}: ${promptBody}`));
+    if (systemPrompt) detailNode = <PromptDetail event={event} />;
+  } else if (event.kind === "agent_transition") {
+    const from = (p.from as string) ?? "(none)";
+    const to = (p.to as string) ?? "(none)";
+    bodyNode = (
+      <span>
+        changed actor{" "}
+        <span style={{ color: resolveAgentDisplay(from).color }}>{from}</span>
+        {" → "}
+        <span style={{ color: resolveAgentDisplay(to).color }}>{to}</span>
+      </span>
+    );
+  } else if (event.kind === "state_transition") {
+    bodyNode = (
+      <span>
+        changed state to{" "}
+        <strong style={{ color: "var(--fg-0)" }}>{(p.status as string) ?? "unknown"}</strong>
+      </span>
+    );
+  } else if (synthetic || (event.kind === "agent_stream" && !isArrow)) {
+    bodyNode = renderMarkdown(maybePrettyJson(synthetic ? "Continuing…" : fullLine));
+  } else if (event.kind === "dispatch_completed") {
+    bodyNode = <span>{fullLine}</span>;
+    detailNode = <DispatchCompletedDetail event={event} />;
+  } else {
+    // Lifecycle / housekeeping events — clean one-liners, not raw JSON.
+    const text = isArrow ? line.slice(2) : fullLine;
+    bodyNode = renderMarkdown(maybePrettyJson(text));
+    if (text.length > 200) {
+      detailNode = <pre className="packet-pre" style={{ margin: 0 }}>{fullLine}</pre>;
+    }
+  }
+
+  const hasDetail = detailNode != null;
 
   return (
     <div className={"hist-evt" + (isOpen ? " open" : "") + (hasDetail ? " has-packet" : "")}>
@@ -1628,11 +1753,17 @@ function HistoryEvent({
               {formatTokens(turnTokens)}
             </span>
           )}
+          {model && (
+            <span className="hist-evt-model" title={modelRaw ?? undefined}>
+              {model.label}
+              {model.variant && <span className="hist-evt-model-variant">{model.variant}</span>}
+            </span>
+          )}
           <span className="hist-evt-meta-spacer" />
           {hasDetail && <span className="hist-evt-chev">{isOpen ? "▾" : "▸"}</span>}
         </div>
         <div className="hist-evt-body">
-          <span className="hist-evt-text">{displayLine}</span>
+          <div className="hist-evt-text">{bodyNode}</div>
           {hasArrows && (
             <div className="hist-evt-arrows">
               {arrows.map((a) => (
@@ -1644,19 +1775,7 @@ function HistoryEvent({
           )}
         </div>
       </div>
-      {isOpen && hasDetail && (
-        <div className="packet">
-          {event.kind === "dispatch_completed" ? (
-            <DispatchCompletedDetail event={event} />
-          ) : isPromptEvent ? (
-            <PromptDetail event={event} />
-          ) : (
-            <pre className="packet-pre" style={{ margin: 0 }}>
-              {fullLine}
-            </pre>
-          )}
-        </div>
-      )}
+      {isOpen && hasDetail && <div className="packet">{detailNode}</div>}
     </div>
   );
 }

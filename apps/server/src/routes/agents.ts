@@ -259,7 +259,8 @@ export function agentsRoutes(): Hono<OrcaEnv> {
       .limit(limit * 3);
 
     // Group events by storyId, then pair prompt→completed.
-    const byStory = new Map<string, typeof rows>();
+    // storyId is nullable: project-scoped dispatches (PRD/audit) leave it null.
+    const byStory = new Map<string | null, typeof rows>();
     for (const row of rows) {
       const list = byStory.get(row.storyId) ?? [];
       list.push(row);
@@ -271,7 +272,7 @@ export function agentsRoutes(): Hono<OrcaEnv> {
 
     const invocations: Array<{
       id: string;
-      storyId: string;
+      storyId: string | null;
       agent: string;
       promptAt: string;
       prompt: string;

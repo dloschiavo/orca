@@ -80,7 +80,7 @@ function findRepoRoot(): string {
   );
 }
 
-const PROMPTS_DIR = resolve(findRepoRoot(), "prompts");
+export const PROMPTS_DIR = resolve(findRepoRoot(), "prompts");
 
 /**
  * Parse a prompt file's body into its [SYSTEM] and [MAIN] sections.

@@ -368,6 +368,20 @@
 .pane-divider:hover,
 .pane-divider:active { background: var(--ag-impl); opacity: 0.35; }
 
+/* Horizontal twin — drags the Stories panel height within the list column. */
+.pane-divider-h {
+  flex: 0 0 5px;
+  margin-top: -3px;
+  margin-bottom: -3px;
+  cursor: row-resize;
+  background: transparent;
+  position: relative;
+  z-index: 5;
+  transition: background 120ms ease;
+}
+.pane-divider-h:hover,
+.pane-divider-h:active { background: var(--ag-impl); opacity: 0.35; }
+
 /* ── Story list ────────────────────────────────────────────────────────────── */
 .pl-toolbar {
   height: 40px; display: flex; align-items: center; gap: 10px;
@@ -502,6 +516,10 @@
 
 /* ── Story detail pane ────────────────────────────────────────────────────── */
 .sd-empty { color: var(--fg-3); padding: 40px; text-align: center; font-family: var(--mono); font-size: 12px; }
+/* PRD/audit detail panes wrap in .sd; make it a full-height flex column so
+   .sd-body (and the mono editor inside it) fill the pane. The story pane
+   renders sd-head/sd-tabs/sd-body directly in .pane-detail and needs no .sd. */
+.sd { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
 .sd-head {
   border-bottom: 1px solid var(--border-0);
   background: var(--bg-1);
@@ -717,6 +735,13 @@
 .inline-q-resolved-label { margin-left: auto; color: var(--st-done); font-size: 10.5px; font-weight: 500; }
 .inline-q-text { color: var(--fg-0); font-size: 13.5px; line-height: 1.5; margin-bottom: 4px; }
 .inline-q-reason { font-size: 11.5px; color: var(--fg-3); font-style: italic; margin-bottom: 8px; }
+/* Rendered-markdown question detail — scannable (lists + inline code), not a wall of prose. */
+.inline-q-detail { font-size: 12.5px; color: var(--fg-2); line-height: 1.55; margin-bottom: 10px; }
+.inline-q-detail p { margin: 0 0 6px; }
+.inline-q-detail p:last-child { margin-bottom: 0; }
+.inline-q-detail ul, .inline-q-detail ol { margin: 6px 0; padding-left: 18px; }
+.inline-q-detail li { margin: 3px 0; }
+.inline-q-detail code { font-family: var(--mono); font-size: 11px; background: var(--bg-2); color: var(--fg-1); padding: 1px 5px; border-radius: var(--r-sm); }
 .inline-q-input {
   display: flex; align-items: flex-start; gap: 8px;
   padding: 8px 10px;
@@ -756,6 +781,10 @@
   padding: 4px 0 12px;
   font-size: 11px; color: var(--fg-3);
 }
+.hist-load-more {
+  display: flex; justify-content: center;
+  padding: 14px 0 8px;
+}
 .hist-evt {
   transition: background 120ms;
 }
@@ -786,6 +815,11 @@
 .hist-evt-tokens { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .hist-evt-tokens-down { color: var(--fg-1); }
 .hist-evt-tokens-up { color: var(--ag-impl); }
+.hist-evt-model { display: inline-flex; gap: 4px; align-items: center; font-family: var(--mono); font-size: 11px; color: var(--fg-3); white-space: nowrap; }
+.hist-evt-model-variant {
+  padding: 0 4px; border-radius: 3px; font-size: 10px;
+  color: var(--fg-2); background: var(--bg-2, var(--bg-0)); border: 1px solid var(--border-0);
+}
 .hist-evt-chev { font-size: 12px; color: var(--fg-3); text-align: center; font-family: var(--mono); }
 .hist-evt.open .hist-evt-chev { color: var(--ag-impl); }
 .hist-evt-arrows { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
@@ -1146,3 +1180,176 @@ select.input { appearance: auto; cursor: default; }
   letter-spacing: 0.06em; text-transform: uppercase;
   color: var(--fg-3); margin-bottom: 4px;
 }
+
+/* ── PRD + Audit list sections (3 macro rows) ───────────────────────────── */
+.workspace-list { overflow: hidden; }
+/* Top region (PRDs + Audits) absorbs the slack; Stories is a fixed,
+   user-draggable panel below the .pane-divider-h. */
+.workspace-list-top { flex: 1 1 0; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column; }
+.workspace-list-stories { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border-0); }
+/* Inside the unified top scroll region the per-list cap is redundant — let the
+   region itself scroll so the freed space is actually usable. */
+.workspace-list-top .macro-rows { max-height: none; }
+.macro-section { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--border-1); }
+.macro-section.story-section { flex: 1 1 0; border-bottom: none; }
+.macro-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px var(--pad-x); cursor: default;
+  background: var(--bg-1); border-bottom: 1px solid var(--border-0);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-2); user-select: none;
+}
+.macro-head:hover { color: var(--fg-0); }
+.macro-chevron { color: var(--fg-3); font-size: 10px; width: 10px; }
+.macro-title { font-weight: 600; }
+.macro-count {
+  margin-left: auto; font-family: var(--mono); font-size: 10.5px;
+  color: var(--fg-2); background: var(--bg-3); border-radius: var(--r-sm);
+  padding: 1px 7px; font-variant-numeric: tabular-nums;
+}
+.macro-rows { overflow-y: auto; overflow-x: hidden; max-height: 30vh; min-height: 0; }
+.story-section .pl-rows { max-height: none; }
+.macro-empty, .macro-showmore {
+  padding: 10px var(--pad-x); font-family: var(--mono); font-size: 11px; color: var(--fg-3);
+}
+.macro-showmore { cursor: default; border-top: 1px solid var(--border-0); }
+.macro-showmore:hover { color: var(--fg-1); }
+
+.prd-head, .audit-head {
+  display: grid; gap: 8px; padding: 4px var(--pad-x);
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--fg-3); border-bottom: 1px solid var(--border-0); background: var(--bg-0);
+}
+.prd-head { grid-template-columns: 1fr 96px 28px 40px 26px; }
+.audit-head { grid-template-columns: 1fr 28px 40px 44px 26px; }
+
+.prd-row, .audit-row {
+  display: grid; gap: 8px; padding: 0 var(--pad-x);
+  height: var(--row-h); align-items: center;
+  border-bottom: 1px solid var(--border-0);
+  cursor: default; font-size: 12.5px; position: relative;
+}
+.prd-row { grid-template-columns: 1fr 96px 28px 40px 26px; }
+.audit-row { grid-template-columns: 1fr 28px 40px 44px 26px; }
+.prd-row:hover, .audit-row:hover { background: var(--bg-hover); }
+.prd-row.active, .audit-row.active { background: var(--bg-2); }
+.prd-row.active::before, .audit-row.active::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--ag-spec);
+}
+.prd-row.faded { opacity: 0.5; }
+
+.prd-cell-title, .audit-cell-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.prd-title-text, .audit-title-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-0);
+}
+.prd-cell-num { text-align: right; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--fg-1); }
+/* Items completion: fill bar + done/total, right-aligned in the column. */
+.prd-cell-items { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.prd-bar-track { flex: 1; min-width: 24px; height: 4px; border-radius: 2px; background: var(--bg-3); overflow: hidden; }
+.prd-bar-fill { display: block; height: 100%; border-radius: 2px; background: var(--ag-spec); }
+.prd-bar-fill.complete { background: var(--attn-done); }
+.prd-bar-num { flex-shrink: 0; font-family: var(--mono); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--fg-2); white-space: nowrap; }
+.prd-cell-upd { text-align: right; font-family: var(--mono); font-size: 10.5px; color: var(--fg-3); }
+.prd-muted { color: var(--fg-4); }
+.prd-attn { color: var(--attn-high); font-weight: 600; }
+.audit-fail { color: var(--st-blocked); font-weight: 600; }
+.prd-tag {
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.05em;
+  background: var(--bg-3); color: var(--fg-2); border-radius: var(--r-sm);
+  padding: 1px 5px; flex-shrink: 0;
+}
+.prd-tag.complete { color: var(--attn-done); background: color-mix(in oklab, var(--attn-done) 14%, var(--bg-3)); }
+.prd-tag.ignored  { color: var(--fg-3); }
+.audit-sched { font-family: var(--mono); font-size: 10px; color: var(--fg-3); flex-shrink: 0; }
+
+/* Row kebab — visible affordance for the same actions as right-click. */
+.row-kebab {
+  background: transparent; border: 0; color: var(--fg-3); cursor: default;
+  font-size: 15px; line-height: 1; padding: 0; width: 22px; height: 22px;
+  border-radius: var(--r-sm); opacity: 0.55; justify-self: end;
+}
+.prd-row:hover .row-kebab, .audit-row:hover .row-kebab { opacity: 1; }
+.row-kebab:hover { background: var(--bg-3); color: var(--fg-0); }
+
+/* In-row active-agent status chip (drafting / building / auditing + animation).
+   margin-left:auto right-aligns it within the flex title cell so it sticks out
+   past the title. Color is keyed by verb (currentColor also tints the dots). */
+.row-agent-chip {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  margin-left: auto; padding-left: 8px; font-size: 9.5px; color: var(--ag-spec);
+  text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;
+}
+.row-agent-chip[data-verb="building"] { color: var(--ag-backend); }
+
+/* PRD/audit History reuses the story feed (.hist / .hist-evt-*) directly. */
+
+/* ── Context menu (position:fixed, portaled, z-9999) ────────────────────── */
+.ctx-menu {
+  min-width: 180px; background: var(--bg-2); border: 1px solid var(--border-2);
+  border-radius: var(--r-md); padding: 4px; box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+}
+.ctx-menu-item {
+  display: block; width: 100%; text-align: left; background: transparent; border: 0;
+  color: var(--fg-1); font: inherit; font-size: 12.5px; padding: 6px 10px;
+  border-radius: var(--r-sm); cursor: default;
+}
+.ctx-menu-item:hover:not(:disabled) { background: var(--bg-3); color: var(--fg-0); }
+.ctx-menu-item:disabled { opacity: 0.4; cursor: not-allowed; }
+.ctx-menu-item.danger { color: var(--st-blocked); }
+
+/* ── Schedule dialog ────────────────────────────────────────────────────── */
+.sched-field { display: flex; flex-direction: column; gap: 5px; }
+.sched-field > label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-3); }
+.sched-field select, .sched-field input {
+  background: var(--bg-0); border: 1px solid var(--border-1); border-radius: var(--r-sm);
+  color: var(--fg-0); font: inherit; font-size: 13px; padding: 6px 8px;
+}
+.sched-days { display: flex; gap: 4px; }
+.sched-day {
+  flex: 1; background: var(--bg-0); border: 1px solid var(--border-1); border-radius: var(--r-sm);
+  color: var(--fg-2); font: inherit; font-size: 11px; padding: 5px 0; cursor: default;
+}
+.sched-day.on { background: var(--ag-impl); border-color: var(--ag-impl); color: var(--bg-0); }
+
+/* ── Mono editor (raw PRD / audit prompt) ───────────────────────────────── */
+/* When the body holds the editor, make it a flex column so the editor fills
+   the full available height (scoped via :has so the story/questions panes,
+   which scroll, are untouched). */
+.sd-body:has(.mono-editor-wrap) { display: flex; flex-direction: column; overflow: hidden; }
+.mono-editor-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.mono-editor-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--fg-3); margin-bottom: 6px; flex-shrink: 0;
+}
+.mono-editor-status { color: var(--fg-2); }
+.mono-editor {
+  flex: 1; min-height: 200px; width: 100%; resize: none;
+  background: var(--bg-0); border: 1px solid var(--border-1); border-radius: var(--r-md);
+  color: var(--fg-0); font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  padding: 10px 12px; outline: none; tab-size: 2;
+}
+.mono-editor:focus { border-color: var(--border-2); }
+
+/* ── PRD/audit detail bits ──────────────────────────────────────────────── */
+.sd-path { font-family: var(--mono); font-size: 11px; color: var(--fg-2); }
+.sd-meta-sep { color: var(--fg-4); margin: 0 6px; }
+.sd-soft { color: var(--fg-3); font-size: 12.5px; padding: 4px 0 8px; }
+.inline-q-saving { font-size: 10px; color: var(--fg-3); white-space: nowrap; padding-top: 3px; }
+.audit-target-input {
+  flex: 1; background: var(--bg-0); border: 1px solid var(--border-1); border-radius: var(--r-sm);
+  color: var(--fg-0); font: inherit; font-size: 12px; padding: 5px 8px; outline: none;
+}
+.md { color: var(--fg-1); font-size: 13px; line-height: 1.6; }
+
+.audit-fail-card {
+  margin: 8px 0; border: 1px solid var(--border-1); border-left: 3px solid var(--attn-high);
+  border-radius: var(--r-md); background: var(--bg-1); padding: 10px 14px;
+}
+.audit-fail-head { display: flex; align-items: center; gap: 8px; }
+.audit-fail-glyph { color: var(--attn-high); font-weight: 700; }
+.audit-fail-title { color: var(--fg-0); font-size: 13px; font-weight: 500; flex: 1; min-width: 0; }
+.audit-fail-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.audit-fail-detail { color: var(--fg-2); font-size: 12px; line-height: 1.5; margin-top: 6px; }
+.audit-fail-fix { color: var(--fg-1); font-size: 12px; margin-top: 6px; }
+.audit-fail-fix-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-3); margin-right: 4px; }

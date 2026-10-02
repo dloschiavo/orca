@@ -40,6 +40,19 @@ reason). A silently skipped rule is itself a fail. Every rule below exists becau
   lands it on the benefit. If your "fix" is the same length, you probably just paraphrased
   the plumbing.
 
+- **[No jargon-dense self-praise]** Never use insider/industry jargon to brag about
+  fairness or pricing mechanics — banned shapes: *"no most-favored-nation games,"*
+  *"the same rate card for every publisher on the book."* The buyer doesn't parse
+  MFN-clause language and it reads as legalese, not a benefit. If the point is "the
+  same published rate for everyone, no negotiating," say exactly that in plain
+  words — or cut it if it's already implied elsewhere on the page.
+
+- **[Brand spelling — "PlayMaker"]** The PlayMaker product name is **always** spelled
+  "PlayMaker" (capital P, capital M) in any user-facing copy — never "Playmaker", never
+  "playmaker". 100% of the time. This applies to rendered strings only (Text/labels/titles/
+  descriptions, in-app and marketing); leave code identifiers, routes (`/playmaker`), enum
+  values (`'playmaker'`), and component names alone — the rule is about copy, not symbols.
+
 ## Process
 
 1. After editing marketing copy, re-read **each sentence** and ask: *"Does this describe

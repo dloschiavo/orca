@@ -1,7 +1,7 @@
-import { spawn } from "node:child_process";
 import { existsSync, readdirSync, accessSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { hasStoredOAuthCredentials } from "./claude-oauth.js";
 
 function findClaudeBin(): string | null {
   // 1. Explicit env var set by setup-env.ts
@@ -30,6 +30,14 @@ export interface ClaudeAuthStatus {
   binFound: boolean;
 }
 
+// `/health` is polled every ~10s by the login banner. Auth state changes
+// rarely and the OAuth presence read touches the macOS keychain (spawns
+// `security`), so a determinate *positive* result is cached briefly to keep
+// the poll cheap. Negative results are NOT cached, so a fresh `claude auth
+// login` (or a Recheck click) is reflected on the very next poll.
+let cachedPositive: { status: ClaudeAuthStatus; at: number } | null = null;
+const POSITIVE_CACHE_TTL_MS = 30_000;
+
 export async function checkClaudeAuth(): Promise<ClaudeAuthStatus> {
   // API key in env — works for any spawn
   if (process.env.ANTHROPIC_API_KEY) {
@@ -41,31 +49,34 @@ export async function checkClaudeAuth(): Promise<ClaudeAuthStatus> {
     return { loggedIn: true, method: "host-managed", binFound: true };
   }
 
-  const bin = findClaudeBin();
-  if (!bin) {
-    return { loggedIn: false, method: "none", binFound: false };
+  // Explicit token in env (used by some CI / headless setups)
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    return { loggedIn: true, method: "oauth", binFound: true };
+  }
+  if (process.env.ANTHROPIC_AUTH_TOKEN) {
+    return { loggedIn: true, method: "api-key", binFound: true };
   }
 
-  // Run `claude auth status` — fast, local-only, no API calls
-  const result = await new Promise<{ loggedIn: boolean }>((resolve) => {
-    const child = spawn(bin, ["auth", "status"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 5000,
-    });
-    let stdout = "";
-    child.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
-    child.once("close", () => {
-      try {
-        const parsed = JSON.parse(stdout);
-        resolve({ loggedIn: parsed.loggedIn === true });
-      } catch {
-        resolve({ loggedIn: false });
-      }
-    });
-    child.once("error", () => resolve({ loggedIn: false }));
-  });
+  if (cachedPositive && Date.now() - cachedPositive.at < POSITIVE_CACHE_TTL_MS) {
+    return cachedPositive.status;
+  }
 
-  return { loggedIn: result.loggedIn, method: result.loggedIn ? "oauth" : "none", binFound: true };
+  const binFound = findClaudeBin() != null;
+
+  // Determine login state by reading the CLI's stored OAuth credentials
+  // directly — the same source the dispatcher refreshes from. Unlike spawning
+  // `claude auth status`, this can't time out under load, be SIGTERM'd
+  // mid-startup, or choke on a non-JSON line — the failure modes that were
+  // flipping the banner to "not logged in" on a perfectly authenticated CLI.
+  const hasOAuth = await hasStoredOAuthCredentials();
+  if (hasOAuth) {
+    const status: ClaudeAuthStatus = { loggedIn: true, method: "oauth", binFound };
+    cachedPositive = { status, at: Date.now() };
+    return status;
+  }
+
+  cachedPositive = null;
+  return { loggedIn: false, method: "none", binFound };
 }
 
 const RED = "\x1b[31m";

@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { schema } from "@orca/db";
+import { sanitizeForJsonb } from "./sanitize-jsonb.js";
 import type { OrcaDb } from "@orca/db";
 import type { StoryStatus } from "@orca/shared";
 
@@ -36,7 +37,7 @@ export async function handleDispatchRejection(
     storyId,
     kind: "dispatch_failed",
     actor,
-    payload: { context: ctx.context, error: errMsg },
+    payload: sanitizeForJsonb({ context: ctx.context, error: errMsg }),
   }).catch((logErr) => {
     console.error(`[orca] failed to log dispatch_failed for ${storyId}:`, logErr);
   });
@@ -65,7 +66,7 @@ export async function handleDispatchRejection(
       storyId,
       kind: "state_transition",
       actor,
-      payload: { status: "blocked", reason: `dispatch failed ${newFailCount}x` },
+      payload: sanitizeForJsonb({ status: "blocked", reason: `dispatch failed ${newFailCount}x` }),
     });
     return;
   }
@@ -84,6 +85,6 @@ export async function handleDispatchRejection(
     storyId,
     kind: "state_transition",
     actor,
-    payload: { status: "backlog", from: "implementing", reason: "dispatch_failed_revert" },
+    payload: sanitizeForJsonb({ status: "backlog", from: "implementing", reason: "dispatch_failed_revert" }),
   });
 }

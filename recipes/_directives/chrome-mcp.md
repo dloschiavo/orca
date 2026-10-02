@@ -113,6 +113,17 @@ You will not, under any circumstance:
   switch to its existing tab and re-navigate in place, or read its
   current state with `take_snapshot` / `get_page_text` / `read_page`.
 
+### If `tabs_context_mcp` says "No tab group exists for this session"
+
+Call `tabs_context_mcp {createIfEmpty: true}` and use the tab it returns —
+that is the sanctioned path, not a violation. "No tab group" is NEVER a
+blocker and NEVER a reason to fall back to the desktop app's built-in
+browser pane or to API/DB-only verification (David, 2026-09-24: "nothing is
+stopping you from accessing chrome. there are already open tabs." — the
+earlier text here told agents to fall back to the pane instead, and saying so
+in a session is itself the failure). Do it once per session, then
+`navigate` that tab in place for everything after.
+
 ### If you think you have a legitimate reason to close a tab
 
 You don't. The orchestrator handles teardown. Re-read this section.
@@ -127,6 +138,35 @@ Each navigation and screenshot costs the user wall-clock time and tokens.
   `take_snapshot`) over `take_screenshot` unless the bug is specifically
   visual. Screenshots are the most expensive verification path.
 - If a page already loaded the URL you need, do not re-navigate to it.
+- `browser_batch` works on the session's group tab (the one `tabs_context_mcp` returned) —
+  prefer it for multi-step click/type/read sequences.
+
+## 4. A blank screenshot of a hidden tab is NOT a rendering bug
+
+The session's tab usually lives in a window the user isn't looking at, so the
+page reports `document.visibilityState === 'hidden'`. In that state `computer
+{screenshot}` is unreliable once the page is scrolled: frames come back with
+fixed/sticky chrome misplaced or missing and the rest blank, and past a few
+thousand px of scroll they come back as one uniform dark frame. The capture
+also silently overrides the page's viewport (`innerWidth`/`innerHeight` jump
+by 4/3 and stay that way). None of that is the page.
+
+Before you diagnose a blank or partial frame as a page bug (GPU layer limits,
+`will-change`, `content-visibility`, a too-tall list):
+
+1. Read `document.visibilityState` with `javascript_tool`. If it's `hidden`,
+   the screenshot proves nothing about scrolled content.
+2. Judge layout by geometry, not pixels: check `getBoundingClientRect()` on
+   the fixed/sticky chrome and the target elements at that `scrollY`.
+3. Run a control in the same tab: `document.write` a plain page of tall
+   coloured stripes plus a fixed footer, scroll it the same distance, and
+   capture it. If the control blanks too, the capture is the cause. Navigate
+   back afterwards.
+
+Never raise or focus the window to make the capture work (rule 1). Why: on
+2026-10-01 a metamox `/reserve-list` "blank frame past scrollY 5000" turned out
+to be this. A dependency-free 20k-px stripes page failed the same way at the
+same offsets.
 
 ---
 
