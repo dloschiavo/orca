@@ -11,6 +11,10 @@ import {
   loadUsageFractionFromDb,
   backfillUsageFractionFromActivity,
 } from "./services/concurrency.js";
+import {
+  getAvailableModels,
+  getAvailableModelsStatus,
+} from "./services/available-models.js";
 
 export interface AppDeps {
   db: OrcaDb;
@@ -69,6 +73,13 @@ export function createApp(deps: AppDeps): Hono<OrcaEnv> {
     const info = getUsageFraction();
     return c.json({ usage: info });
   });
+
+  app.get("/api/models", (c) =>
+    c.json({
+      models: getAvailableModels(),
+      status: getAvailableModelsStatus(),
+    }),
+  );
 
   app.route("/api/projects", projectsRoutes());
   app.route("/api/stories", storiesRoutes());

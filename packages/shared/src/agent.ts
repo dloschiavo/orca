@@ -34,3 +34,19 @@ export interface Agent {
   updatedAt: string;
 }
 
+// Shape returned by `GET /api/models` and used everywhere we render the
+// list of models a user can pick from. The server populates this from
+// Anthropic's `/v1/models` endpoint on a refresh loop, so we never
+// hard-code the live model lineup. `AVAILABLE_MODELS_FALLBACK` is only
+// used before the first refresh completes (or if it fails).
+export interface AvailableModel {
+  id: string;
+  displayName: string;
+}
+
+export const AVAILABLE_MODELS_FALLBACK: readonly AvailableModel[] = [
+  { id: "claude-opus-4-7", displayName: "Claude Opus 4.7" },
+  { id: "claude-sonnet-4-6", displayName: "Claude Sonnet 4.6" },
+  { id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5" },
+] as const;
+

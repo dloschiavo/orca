@@ -5,7 +5,7 @@ import { api } from "../api.js";
 import type { AgentInvocation } from "../api.js";
 import { PageHeader } from "../components/PageHeader.js";
 import { Breadcrumb } from "../components/Breadcrumb.js";
-import type { Agent } from "@orca/shared";
+import { AVAILABLE_MODELS_FALLBACK, type Agent, type AvailableModel } from "@orca/shared";
 import { agentColors, agentIcon } from "../utils/agentStyle.js";
 
 export function AgentsPage() {
@@ -266,6 +266,54 @@ function CreateAgentForm({
   );
 }
 
+function useAvailableModels(): readonly AvailableModel[] {
+  // Refresh every 10 minutes so a server-side bump shows up without a
+  // manual reload. The server itself polls Anthropic hourly; the UI just
+  // mirrors whatever the server has cached.
+  const { data } = useQuery({
+    queryKey: ["models"],
+    queryFn: () => api.models.list(),
+    staleTime: 10 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+  });
+  return data?.models ?? AVAILABLE_MODELS_FALLBACK;
+}
+
+function ModelSelect({
+  value,
+  onChange,
+  defaultLabel,
+  dirty,
+  fieldClass,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  defaultLabel: string;
+  dirty: boolean;
+  fieldClass: (dirty: boolean) => string;
+}) {
+  const models = useAvailableModels();
+  const knownIds = models.map((m) => m.id);
+  const hasUnknown = value !== "" && !knownIds.includes(value);
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={`w-full px-3 py-2 border rounded-md text-sm text-text font-mono ${fieldClass(dirty)}`}
+    >
+      <option value="">{defaultLabel}</option>
+      {models.map((m) => (
+        <option key={m.id} value={m.id}>
+          {m.id}
+        </option>
+      ))}
+      {hasUnknown && (
+        <option value={value}>{value} (unknown)</option>
+      )}
+    </select>
+  );
+}
+
 function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) {
   const qc = useQueryClient();
 
@@ -420,24 +468,24 @@ function AgentDetail({ agentName, agent }: { agentName: string; agent: Agent }) 
           <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
             Model
           </label>
-          <input
-            type="text"
+          <ModelSelect
             value={modelDraft}
-            onChange={(e) => setModelDraft(e.target.value)}
-            placeholder="(default)"
-            className={`w-full px-3 py-2 border rounded-md text-sm text-text font-mono placeholder:text-muted/50 ${fieldClass(modelDraft !== (agent.model ?? ""))}`}
+            onChange={setModelDraft}
+            defaultLabel="(default)"
+            dirty={modelDraft !== (agent.model ?? "")}
+            fieldClass={fieldClass}
           />
         </div>
         <div className="flex-1">
           <label className="text-[11px] uppercase tracking-wider text-muted block mb-1">
             Fast Model
           </label>
-          <input
-            type="text"
+          <ModelSelect
             value={fastModelDraft}
-            onChange={(e) => setFastModelDraft(e.target.value)}
-            placeholder="(none)"
-            className={`w-full px-3 py-2 border rounded-md text-sm text-text font-mono placeholder:text-muted/50 ${fieldClass(fastModelDraft !== (agent.fastModel ?? ""))}`}
+            onChange={setFastModelDraft}
+            defaultLabel="(none)"
+            dirty={fastModelDraft !== (agent.fastModel ?? "")}
+            fieldClass={fieldClass}
           />
         </div>
       </div>

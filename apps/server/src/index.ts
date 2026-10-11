@@ -3,6 +3,7 @@ import { createApp } from "./app.js";
 import { createDb, startEmbeddedPg } from "@orca/db";
 import { runMigrations } from "./db/migrate.js";
 import { startHeartbeat } from "./services/heartbeat.js";
+import { startAvailableModelsRefresh } from "./services/available-models.js";
 
 const PORT = Number(process.env.PORT ?? 4455);
 
@@ -37,9 +38,15 @@ async function main() {
   );
   const stopHeartbeat = startHeartbeat(db, heartbeatMs);
 
+  // Keep the Anthropic model list fresh so newly-shipped models show up
+  // in the agent dropdown and the `{models.list}` prompt placeholder
+  // without a server-code change.
+  const stopModelsRefresh = startAvailableModelsRefresh();
+
   const shutdown = async () => {
     console.log("\n[orca] shutting down...");
     stopHeartbeat();
+    stopModelsRefresh();
     server.close();
     if (stopEmbedded) await stopEmbedded();
     process.exit(0);

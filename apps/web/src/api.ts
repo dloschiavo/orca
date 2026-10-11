@@ -4,6 +4,7 @@
 import type {
   Agent,
   AuditRow,
+  AvailableModel,
   Classification,
   Finding,
   FindingStatus,
@@ -283,6 +284,19 @@ export const api = {
       ),
     listInvocations: (name: string, limit = 50) =>
       request<{ invocations: AgentInvocation[] }>(`/agents/${name}/invocations?limit=${limit}`),
+  },
+
+  // --- models ---
+  models: {
+    list: () =>
+      request<{
+        models: AvailableModel[];
+        status: {
+          count: number;
+          lastFetchedAt: string | null;
+          lastError: string | null;
+        };
+      }>("/models"),
   },
 };
 

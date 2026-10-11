@@ -6,7 +6,7 @@ import { desc, eq, isNull } from "drizzle-orm";
 import { schema } from "@orca/db";
 import type { OrcaDb } from "@orca/db";
 import type { AgentName } from "@orca/shared";
-import { AVAILABLE_MODELS_LIST } from "../agents/model.js";
+import { getAvailableModelsList } from "../agents/model.js";
 
 export type PromptVarResolver = string | (() => string | Promise<string>);
 export type PromptKey = "main" | "system";
@@ -35,7 +35,7 @@ export async function renderPromptLazy(
   });
 
   const allResolvers: Record<string, PromptVarResolver> = {
-    "models.list": AVAILABLE_MODELS_LIST,
+    "models.list": () => getAvailableModelsList(),
     ...resolvers,
   };
 
