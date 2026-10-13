@@ -6,7 +6,7 @@ description: >
   deploy. Covers the 12-provider table on 3 wire drivers, AES-256-GCM sealed
   keys in one settings row with env keys shown read-only, model-list discovery
   (on add/rotate AND on page load for never-checked/day-old keys), and the
-  "Priority" page: Standard/Economy lists of tiers (provider + model + keys),
+  "Priority" page: one ordered list of tiers (provider + model + keys),
   keys round-robin within a tier, classified fallthrough with per-model vs
   key-wide cooldowns, and per-job routing records.
 dependencies:
@@ -23,15 +23,17 @@ Every LLM call a project makes goes through ONE runner that decides, at fire
 time, which provider, model and key serve the job, and what takes over when a
 key runs out of quota. The operator sets it on one superadmin page (`/platform/llm`,
 sidebar "LLM Providers") and it takes effect within seconds without a deploy.
-The key insight: **callers never name a provider model. They name a tier
-constant (`FULL_MODEL` / `DEGRADED_MODEL`), and the runner maps that to an
-ordered list of tiers.** So swapping Gemini for Claude, adding a second key to
-pool quota, or pointing over-budget orgs at a cheaper model is a page edit, not
-a code change.
+The key insight: **callers never name a provider model. They name the queue's
+default model constant (`FULL_MODEL`), and the runner maps that to an ordered
+list of tiers.** So swapping Gemini for Claude, adding a second key to pool
+quota, or putting a cheaper model behind the primary is a page edit, not a code
+change.
 
 Reference implementation: diplomat `web/` — `lib/llm/{providers,secretBox,settings,chain,run,drivers,pricing,admin}.ts`,
 `app/api/platform/llm/route.ts`, `app/platform/llm/page.tsx`, spec `docs/prd-llm-providers.md`,
-tests `lib/llm/{chain,run,settings}.test.ts`. Siblings sharing the provider
+tests `lib/llm/{chain,run,settings}.test.ts`. Diplomat also carries a second
+"Economy" list that its per-org budget ladder routes to; that is Diplomat-only,
+so don't port it. Siblings sharing the provider
 table: docpost `docpost-app/lib/llm/` + `app/(app)/platform/llm.tsx` (the
 original template) and Thopter `packages/core/src/drivers/providers.ts`.
 
@@ -44,7 +46,7 @@ Never a collection per key.
 interface LlmSettings {
   keys: StoredKey[];                         // operator-added keys
   env_models: Record<string, ModelCache>;    // model lists fetched with an env key, by provider
-  chains: { standard: StoredTier[]; economy: StoredTier[] };
+  chain: StoredTier[];                       // the Priority list, in order
 }
 interface ModelCache { models: LlmModelInfo[]; models_fetched_at: string | null; models_error: string | null }
 interface StoredKey extends ModelCache {
@@ -133,30 +135,27 @@ the provider's message. The key row's status badge is one of: cooldown
 badge(s) with "until <time>", **Check failed** + reason, **Ready** (title = checked
 timestamp), or **Not checked**.
 
-## Priority (the chains)
+## Priority (the chain)
 
 The page section is titled **Priority**. Never "Fallback Chains": the
-operator renamed it, and code alone keeps the word "chain". Two lists:
-
-| List | Serves | Copy on the page |
-|---|---|---|
-| Standard | callers naming `FULL_MODEL` | "Every chat turn, knowledge-base job and scheduled prompt." |
-| Economy | callers naming `DEGRADED_MODEL` (the usage budget ladder's downgrade) | "Orgs past 80% of their monthly LLM budget. Point this at cheaper models to protect margin." |
+operator renamed it, and code alone keeps the word "chain". It is ONE ordered
+list of tiers, and it serves every caller naming `FULL_MODEL`. Page copy names
+what it serves in the project's own words, e.g. "Every chat turn,
+knowledge-base job and scheduled prompt."
 
 `planJobChain(settings, callerModel)` is THE ONLY answer to "what does this
 job run on". The queue handler calls it at fire time and nothing else decides:
 
 ```text
-FULL_MODEL      → Standard              | unset → built-in: Gemini FULL_MODEL on every Google key
-DEGRADED_MODEL  → Economy → Standard    | both unset → built-in: Gemini DEGRADED_MODEL on every Google key
-any other model → that Gemini model on every Google key ("pinned": a manual run, an eval), then Standard
+FULL_MODEL      → Priority   | empty → built-in: Gemini FULL_MODEL on every Google key
+any other model → that Gemini model on every Google key ("pinned": a manual run, an eval), then Priority
 ```
 
 A tier resolves to concrete key ids: `key_ids` filtered to keys that still
 exist, or every provider key when `key_ids` is empty.
 
-Saving replaces both lists in one call (one dirty-state Save button + Cmd+S).
-Server validation names the place: "Standard tier 2: choose a model", "…: a
+Saving replaces the whole list in one call (one dirty-state Save button + Cmd+S).
+Server validation names the place: "Tier 2: choose a model", "…: a
 selected key is not a Google Gemini key", "…: Google Gemini has no keys",
 "…: set both the input and output price". The client catches half-set prices
 before the round trip. Success copy: **"Saved. New prompts follow this priority within 15 seconds."**
@@ -191,7 +190,7 @@ Removing a key drops it from every tier that named it. A tier left with
 ```
 
 5. If every attempt fails over: when any reason is passing (rate limit, quota, overloaded, unreachable), throw a message containing "rate limit" so the queue's transient retry re-queues with backoff. Otherwise throw a permanent config error. Both list every provider/model/key/reason, and when each cooling key comes back.
-6. Return `routing = { chain, tier, provider, model, key (label), fallbacks[] }` on the job response. The served model is `routing.model`, not `inputs.model`.
+6. Return `routing = { tier, provider, model, key (label), fallbacks[] }` on the job response. The served model is `routing.model`, not `inputs.model`.
 
 Cooldowns and cursors live in process memory, pinned on `globalThis`. They are
 per instance: each instance learns a key is spent from its own 429, which
@@ -204,23 +203,23 @@ sharing until it's asked for.
 (dated snapshots share the family price). Unknown → `null`, so the UI shows
 "—" and never a wrong number. The precedence is the tier's own price, then
 the known price, then null. OpenRouter reports billed cost. This table is
-**margin-load-bearing**, because it feeds the per-org budget ladder.
+**margin-load-bearing**, because it feeds any per-org LLM budget the project meters.
 Understating a price silently erodes margin.
 
 ## API
 
 `GET /api/platform/llm` (superadmin): refresh stale model lists, then return the
 view: providers, keys (hint only, never a secret, with live cooldowns on this
-instance), chains, `can_store_keys`. `PATCH` takes one op per request:
-`add_key` / `update_key` / `remove_key` / `refresh_models` / `save_chains`.
+instance), chain, `can_store_keys`. `PATCH` takes one op per request:
+`add_key` / `update_key` / `remove_key` / `refresh_models` / `save_chain`.
 Every op except refresh writes an audit row (`llm_key_added`, `llm_key_updated`
-with changed field names but never values, `llm_key_removed`, `llm_chains_saved`
+with changed field names but never values, `llm_key_removed`, `llm_chain_saved`
 with `provider/model` per tier). Config errors are 400s carrying the message.
 
 ## Fit-to-Project
 
 - Does the project route LLM work through `admin-prompt-queue`? This recipe plugs in as the handler body. Any direct provider SDK call elsewhere must move onto the queue first, or it bypasses priority, rotation and metering.
-- What are the project's tier constants (`FULL_MODEL` / `DEGRADED_MODEL`)? Is there a budget ladder that produces the downgrade? If there's no ladder, Economy still makes sense for cheap batch jobs. Decide which callers name it.
+- What is the project's default model constant (`FULL_MODEL`)? Every caller that should follow Priority names it. Any call site naming a concrete model is either a deliberate pin or a bug.
 - Where does the platform-settings row live (Postgres via lib/pgdb, Mongo, Firestore-compat)? It's a single indexed point read every 15 s per instance, safe on Firestore-compat.
 - Does the queue already compose a Gemini-shaped request? If it's another shape, pick that as the canonical one and translate from it in each driver instead.
 - Which env keys does the deploy already set? Add them to `LLM_ENV_KEYS`. Provision `LLM_KEY_ENCRYPTION_KEY` in Secret Manager per environment, and exclude it from any "push local env to prod" helper.
@@ -230,8 +229,8 @@ with `provider/model` per tier). Config errors are 400s carrying the message.
 
 - **Model lists only on add-key.** Env keys never take that path, so their tiers show a blank text box instead of a model picker. This shipped broken to prod. Load never-checked and day-old lists on GET.
 - **Re-checking failed keys on every page load.** A dead local server or proxy makes every page view wait 20 s. A failed check waits for an explicit "Refresh models".
-- **Calling the section "Fallback Chains".** The operator renamed it **Priority**. Every user-facing string (heading, save message, empty-Economy note, server validation like "Standard priority must be a list") says priority. Only identifiers say chain.
-- **Callers naming provider models.** `model: "claude-sonnet-…"` at a call site bypasses Priority. Callers name the tier constant, and only a deliberate pin (manual run, eval) names a concrete Gemini model.
+- **Calling the section "Fallback Chains".** The operator renamed it **Priority**. Every user-facing string (heading, save message, server validation like "Priority must be a list") says priority. Only identifiers say chain.
+- **Callers naming provider models.** `model: "claude-sonnet-…"` at a call site bypasses Priority. Callers name `FULL_MODEL`, and only a deliberate pin (manual run, eval) names a concrete Gemini model.
 - **Falling through on every error.** A 400 or a safety block would fail identically on every provider, so spraying it costs n× and buries the real error. Only the classified reasons fall through.
 - **One cooldown scope.** Benching a whole key for one model's rate limit wastes its other models' quota. Spent credits, a rejected key or a dead server must bench the whole key, or every model on it burns a failed call.
 - **Widening a pruned tier.** If removing a key leaves a tier that named specific keys with none, delete the tier. Turning it into "every key" silently starts spending a key the operator excluded.
@@ -244,6 +243,6 @@ with `provider/model` per tier). Config errors are 400s carrying the message.
 ## Logging
 
 - `[llm] <provider>/<model> (<key label>) <reason> — trying the next key/tier` (warn) on each fallthrough.
-- `[llm] <chain> chain served by <provider>/<model> (<label>) after N fallback(s)` when a job needed failover.
-- Per job: `response.routing` (chain, tier, provider, model, key label, `fallbacks[]` with clipped 300-char errors) and the per-attempt request-as-sent. These answer "why did this run on Claude" without logs.
+- `[llm] Priority served by <provider>/<model> (<label>) after N fallback(s)` when a job needed failover.
+- Per job: `response.routing` (tier, provider, model, key label, `fallbacks[]` with clipped 300-char errors) and the per-attempt request-as-sent. These answer "why did this run on Claude" without logs.
 - Exhausted-chain error text lists every attempt and every cooling key with its `until` ISO time.
