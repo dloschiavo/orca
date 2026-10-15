@@ -515,22 +515,37 @@ function spawnWithEarlyFailureWatchdog(cfg, cmd, port, env, cleanupRegistry) {
       resolve(value);
     };
 
-    const watchdog = setTimeout(() => {
-      // Child survived the window — assume bind succeeded. Hand it off
-      // to the long-lived lifecycle.
-      const forward = (sig) => {
+    // Forward signals from the moment the child exists, not only once it
+    // survives the window. A SIGTERM inside the window (a newer run evicting
+    // this one, a quick Ctrl-C) would otherwise kill this helper outright —
+    // no forward, no exit hooks — leaving the child listening as an orphan
+    // behind a stale registry file, which the next run then hunts past.
+    let stopping = false;
+    const forwarders = ["SIGINT", "SIGTERM", "SIGHUP"].map((sig) => {
+      const forward = () => {
+        stopping = true;
         try {
           child.kill(sig);
         } catch {}
       };
-      process.on("SIGINT", () => forward("SIGINT"));
-      process.on("SIGTERM", () => forward("SIGTERM"));
-      process.on("SIGHUP", () => forward("SIGHUP"));
-      child.on("exit", (code, signal) => {
-        cleanupRegistry();
-        if (signal) process.kill(process.pid, signal);
-        else process.exit(code ?? 0);
-      });
+      process.on(sig, forward);
+      return [sig, forward];
+    });
+    const removeForwarders = () => {
+      for (const [sig, forward] of forwarders) process.off(sig, forward);
+    };
+    // The child is gone for good: clean up and leave the same way it did.
+    const exitWithChild = (code, signal) => {
+      cleanupRegistry();
+      removeForwarders();
+      if (signal) process.kill(process.pid, signal);
+      else process.exit(code ?? 0);
+    };
+
+    const watchdog = setTimeout(() => {
+      // Child survived the window — assume bind succeeded. Hand it off
+      // to the long-lived lifecycle.
+      child.on("exit", exitWithChild);
       child.on("error", (err) => {
         process.stderr.write(`[service-ports] spawn error: ${err.message}\n`);
         cleanupRegistry();
@@ -542,6 +557,14 @@ function spawnWithEarlyFailureWatchdog(cfg, cmd, port, env, cleanupRegistry) {
     child.once("exit", (code, signal) => {
       if (settled) return;
       clearTimeout(watchdog);
+      if (stopping) {
+        // We were told to stop and passed it on: this exit is the shutdown,
+        // not a bind failure — never hunt on and respawn.
+        settled = true;
+        exitWithChild(code, signal);
+        return;
+      }
+      removeForwarders();
       // Within the early window — treat any non-zero or signal exit as
       // a bind failure. A clean 0-exit this fast is suspicious too
       // (framework refused to even start) — treat as failure so we
@@ -558,6 +581,7 @@ function spawnWithEarlyFailureWatchdog(cfg, cmd, port, env, cleanupRegistry) {
     child.once("error", (err) => {
       if (settled) return;
       clearTimeout(watchdog);
+      removeForwarders();
       process.stderr.write(`[service-ports] spawn error: ${err.message}\n`);
       reject(err);
     });

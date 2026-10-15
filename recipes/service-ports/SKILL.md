@@ -263,7 +263,7 @@ One file per running dev process. Path: `/tmp/goliath-${port}` (no extension —
    - Race-safe registry write: `fs.writeFileSync(path, body, { flag: "wx" })`. `EEXIST` → another helper beat us → continue scanning.
    - If all 51 candidates are taken: print every occupier and exit 1.
 5. **Spawn child + early-failure watchdog.** Inherit stdio. Set `PORT={resolved}` in env, and (frontend only) `cfg.consumes.envVar={peerUrl}`. Watch the child for `EARLY_FAILURE_WINDOW_MS` (2.5 s). If the child exits non-zero or by signal inside that window — almost always `EADDRINUSE` that the probe couldn't catch (TIME_WAIT race, address family the probe missed, framework-internal port conflict like Vite's worker socket) — unlink the registry file, mark this port as tried-and-failed, and resume the hunt from `canonical + (failed_port - canonical + 1)`. This is the second layer of robustness behind the probe.
-6. **Forward signals.** Once the child survives the watchdog, catch `SIGINT`/`SIGTERM`/`SIGHUP`, forward to child, unlink the registry file before exiting with the child's exit code.
+6. **Forward signals — from the moment the child is spawned.** Catch `SIGINT`/`SIGTERM`/`SIGHUP` and forward them to the child immediately, not only once it survives the watchdog: a newer run evicting this one, or a quick Ctrl-C, can land inside the window. A child that exits after a forwarded signal is a shutdown, never a bind failure — unlink the registry file and exit with the child's code/signal; do not hunt on and respawn.
 7. **Backstop cleanup.** `process.on("exit", …)` unlinks the file on non-graceful exit. Stale files from `kill -9` are handled by step 2 of the next run (own-instance eviction) and the per-candidate liveness probe in step 4.
 
 ### Lifecycle (--start mode)
@@ -488,6 +488,7 @@ Library package (no dev server, no goliath block):
 18. **`nvm use` — in a `predev` hook, in a script, or in the README as "the fix".** It only works in a shell that has already sourced nvm, so it silently does nothing in CI, in an editor task, or under any other version manager. It is also the wrong shape: a README step is the operator doing the tooling's job.
 19. **Spawning a node child with `process.execPath`** (a sidecar, a worker pool, a codegen step). `execPath` is whatever Node started the helper — the exact thing the pin exists to stop mattering. Use `nodeExec()`, which is the pinned interpreter when one was resolved and `execPath` otherwise.
 20. **Re-execing the helper under the pinned Node.** Tempting, and wrong: it leaves a supervisor process per dev server for the life of the session to fix something a `PATH` entry on the child already fixes. The helper needs nothing newer than `fs`/`net`/`spawn`; the *framework* is what needs the pin.
+21. **Forwarding signals only after the early-failure window.** Until the forwarders are installed, `SIGTERM` takes the default action: the helper dies with no forward and no exit hooks, and its child keeps listening as an orphan behind a stale registry file — the next run hunts past it and the project has two dev servers. Install the forwarders at spawn, and treat a child that exits after a forwarded signal as a shutdown, not a bind failure (otherwise the helper re-hunts and respawns the server it was told to stop).
 
 ## Verification
 
