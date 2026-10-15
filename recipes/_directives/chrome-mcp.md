@@ -1,7 +1,11 @@
 # Chrome MCP discipline
 
 You may have access to one or both Chrome MCP families: `mcp__Claude_in_Chrome__*`
-and `mcp__chrome-devtools__*`. Both drive the **user's real browser window on the
+and `mcp__chrome-devtools__*`. In a Thopter session the Claude-in-Chrome tools are
+named `mcp__Chrome__*`, and in a terminal `claude` (or Claude Desktop) they are
+`mcp__ChromeLocal__*` (the same extension, reached through its local native host);
+every rule below that names a `mcp__Claude_in_Chrome__*` tool applies to its
+`mcp__Chrome__*` / `mcp__ChromeLocal__*` twin. Both drive the **user's real browser window on the
 user's real machine**. They are not sandboxed, not ephemeral, and not yours to
 churn. Misuse interrupts the user's work and triggers anti-abuse heuristics
 that lock the browser out for every subsequent agent on this machine.
@@ -20,15 +24,22 @@ following tools. There is no exception, no "just this once," no
 Closing tabs / pages — forbidden (and the orchestrator now denies these at
 the tool layer; calling them will return a tool-not-available error):
 
-- `mcp__Claude_in_Chrome__tabs_close_mcp`
+- `mcp__Claude_in_Chrome__tabs_close_mcp` / `mcp__Chrome__tabs_close_mcp`
 - `mcp__chrome-devtools__close_page`
 
 Creating tabs / pages — forbidden (also denied at the tool layer):
 
-- `mcp__Claude_in_Chrome__tabs_create_mcp`
+- `mcp__Claude_in_Chrome__tabs_create_mcp` / `mcp__Chrome__tabs_create_mcp`
 - `mcp__chrome-devtools__new_page`
 
 You do not need these. There is already a tab open in the user's browser.
+
+**Attaching from a fresh session is NOT "a new window".** The Claude-in-Chrome
+extension scopes tab groups per session, so `tabs_context_mcp` saying "No tab
+group exists for this session" is normal — other sessions' groups are already
+open in the same logged-in browser. Call `tabs_context_mcp({createIfEmpty: true})`
+and use the tab it returns. Never treat a missing session group as "no attachable
+browser", and never fall back to another browser (e.g. the desktop app's pane) for that reason.
 Your only allowed path to load a URL is:
 
 1. `list_pages` (or `list_connected_browsers` + page list) — see what's there
@@ -42,7 +53,7 @@ Spawning a second browser / disconnecting — forbidden:
 
 Focus / window manipulation — forbidden unless the story explicitly requires it:
 
-- `mcp__Claude_in_Chrome__resize_window`
+- `mcp__Claude_in_Chrome__resize_window` / `mcp__Chrome__resize_window`
 - `mcp__chrome-devtools__resize_page`
 - `mcp__chrome-devtools__emulate` (for window/viewport changes)
 - Any "activate / focus / raise / foreground" operation on the window or a tab.

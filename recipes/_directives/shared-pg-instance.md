@@ -22,14 +22,14 @@ service to Postgres.
 
 ## Instance identity (current state — reverify with `gcloud sql instances describe`)
 
-_As of 2026-07-03:_
+_As of 2026-10-09:_
 
 | | |
 |---|---|
 | Connection name | `goliathdynamics-com:us-east4:goliath-pg` |
 | GCP project | `goliathdynamics-com` |
 | Region / version | us-east4 · Postgres 17 |
-| Tier / edition | `db-g1-small` · enterprise (1 shared vCPU, ~1.7 GB, zonal, no HA) |
+| Tier / edition | `db-custom-2-8192` · enterprise (2 vCPU, 8 GB, 50 GB disk, zonal, no HA) · `max_connections` 400 |
 | Public IP | `34.182.178.62` (proxy/connector only — no authorized networks) |
 
 The instance lives in the `goliathdynamics-com` project but is shared by
@@ -87,12 +87,64 @@ creds, NOT ADC. Refresh ADC with `gcloud auth application-default login`
 either rerun that, or bypass ADC entirely with the CLI token:
 `cloud-sql-proxy --port 5433 --token "$(gcloud auth print-access-token)" <conn>`.
 
+## Connection budget — every tenant sizes its pool (binding)
+
+Connections on the shared box are one pool for every tenant, and one tenant
+exhausting it 500s all of them (`53300 remaining connection slots are
+reserved…`). So a service on `goliath-pg` never ships a pool size picked for
+throughput:
+
+- **Ceiling = per-instance pool max × Cloud Run `--max-instances`**, and a
+  deploy roughly doubles it for the minutes the old revision's instances stay
+  alive. Keep that doubled figure well inside the tenant's share of
+  `max_connections` (check `SHOW max_connections`; tiers change it).
+- **Pin both numbers in the service's `cloudbuild.yaml`, side by side** (a
+  `PG_POOL_MAX` env and `--max-instances`), with a comment saying they move
+  together. A pool default buried in code next to a max-instances set by hand
+  in the console is how the budget silently breaks.
+- **Small pools are fine.** A 1-vCPU Cloud Run instance gains nothing from
+  dozens of concurrent queries; requests queue in-process instead of
+  contending for the DB's CPU. Single digits per instance is the norm here.
+- **Bound the pool wait** (`connectionTimeoutMillis`) so a saturated DB fails
+  requests visibly instead of hanging them to the Cloud Run timeout.
+
+Why (2026-10-09): metamox ran `max: 50` per instance with max-instances 20 —
+a 1,000-connection ceiling against 400 — and under crawler load it held ~400
+for hours, starving every other tenant. It now runs 5 × 20.
+
 ## Caveats before piling on more projects
 
-- **`db-g1-small` is a small shared box.** Fine for several low-traffic apps;
+- **It is a small shared box (2 vCPU).** Fine for several low-traffic apps;
   a write-heavy or latency-sensitive workload needs a tier bump
   (`gcloud sql instances patch goliath-pg --tier=…`) or its own instance.
 - **Per-project users default to broad rights** (can see the whole cluster).
   For real isolation between projects on the shared box, restrict each user to
   its own database with explicit grants (`REVOKE`/`GRANT`) — do this before the
   instance holds anything sensitive from more than one project.
+
+## Isolating a tenant (binding when onboarding; done for `influencer_studio` 2026-10-14)
+
+`REVOKE CONNECT … FROM PUBLIC` alone does NOT isolate anything here: every user
+created through the Cloud SQL API is a member of `cloudsqlsuperuser`, and every
+API-created database is OWNED by `cloudsqlsuperuser`, so each tenant user
+inherits the owner's CONNECT on every other tenant's database regardless of the
+ACL. Run all of this as the instance admin `postgres` (its password is Secret
+Manager `goliath-pg-postgres-password` in `goliathdynamics-com`; nothing
+connects as `postgres` except humans, so rotating it breaks no service):
+
+```sql
+GRANT foo TO postgres;                               -- needed to hand ownership over
+ALTER DATABASE foo OWNER TO foo;                     -- out from under cloudsqlsuperuser
+REVOKE CONNECT ON DATABASE foo FROM PUBLIC;
+GRANT  CONNECT ON DATABASE foo TO foo;
+REVOKE cloudsqlsuperuser FROM foo;                   -- stops foo inheriting CONNECT elsewhere
+```
+
+Then **every other database** on the box must also have `REVOKE CONNECT … FROM
+PUBLIC` + `GRANT CONNECT … TO <its user>, postgres` (all tenant DBs got this on
+2026-10-14; a new DB created via `gcloud sql databases create` arrives with
+PUBLIC connect again — lock it in the same onboarding pass). Verify empirically
+through the proxy: the tenant user connects to its own DB and is denied on every
+other; every other tenant still reaches its own. After the `cloudsqlsuperuser`
+revoke the app user cannot `CREATE EXTENSION`; do that as `postgres` if a
+migration ever needs one.

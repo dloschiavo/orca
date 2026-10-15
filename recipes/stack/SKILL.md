@@ -287,24 +287,50 @@ Warm restarts now reuse the disk cache — startup is seconds instead of a full 
 
 Drop this into every Expo app's `metro.config.js` individually — each app owns its own Metro process and there's no workspace-level place for it. Keep `--clear` as an escape hatch for genuinely weird corruption (Metro version bumps, symlink surgery), not as a daily habit.
 
-## Package manager — pnpm with `node-linker=hoisted`
+## Package manager — pnpm; `node-linker=hoisted` for Expo only
 
-Every standalone app in a multi-project workspace like Goliath should install with **pnpm**, configured to write a **flat (hoisted) `node_modules`**. The motivation is disk, not speed: pnpm maintains a single machine-wide content-addressable store (`~/Library/pnpm/store` on macOS), and every project's `node_modules` is a tree of hardlinks — or, on macOS APFS, copy-on-write clonefiles — into that store. A fresh Expo app's `node_modules` is typically 1–1.3 GB under raw `npm install`. Under pnpm, each additional app after the first costs only the packages that aren't already in the store — typically 100–300 MB of real disk. Five independent Expo apps drops from ~6 GB of duplicated `react-native` / Expo SDK / Babel / Metro to ~1.5 GB. The same mechanism handles different versions of the same package across projects — the store is keyed on `(name, version, integrity)`, so conflicting pins coexist without special config.
+Every standalone app in a multi-project workspace like Goliath should install with **pnpm**. The motivation is disk, not speed: pnpm maintains a single machine-wide content-addressable store (`~/Library/pnpm/store` on macOS), and every project's `node_modules` is a tree of hardlinks — or, on macOS APFS, copy-on-write clonefiles — into that store. A fresh Expo app's `node_modules` is typically 1–1.3 GB under raw `npm install`. Under pnpm, each additional app after the first costs only the packages that aren't already in the store — typically 100–300 MB of real disk. Five independent Expo apps drops from ~6 GB of duplicated `react-native` / Expo SDK / Babel / Metro to ~1.5 GB. The same mechanism handles different versions of the same package across projects — the store is keyed on `(name, version, integrity)`, so conflicting pins coexist without special config.
 
 You don't share `node_modules` directories between projects — each project still has its own for isolation. You share the *backing storage* underneath them.
 
-### Why hoisted, not pnpm's default
+The linker is chosen **per package**, by what runs it:
+
+| Package | `.npmrc` linker | Why |
+|---|---|---|
+| Expo / React Native app (Metro bundles it) | `node-linker=hoisted` | Metro + the RN ecosystem trip on pnpm's symlinked layout (below). |
+| Next.js web app | default `isolated` — **no** `node-linker` line | Next (webpack and Turbopack) resolves pnpm's symlinks natively. |
+| Node backend / worker / script package | default `isolated` — **no** `node-linker` line | Node's resolver follows symlinks; isolated also catches phantom deps. |
+
+The deciding test is the bundler, not the folder name: if the package has `expo` / `react-native` in its deps and a `metro.config.js`, it's hoisted; everything else stays isolated. Never copy an Expo app's `.npmrc` into a sibling `web/` or `api/` package.
+
+### Why hoisted for Expo, not pnpm's default
 
 pnpm's default `isolated` linker lays out a symlinked `node_modules/.pnpm/` tree that is strict about phantom dependencies. The React Native ecosystem is full of packages that `require()` undeclared peers, and Metro's resolver has historically tripped on symlinks. You can make `isolated` work, but you'll fight a Whac-A-Mole of `public-hoist-pattern` and `shamefully-hoist` tweaks.
 
 `node-linker=hoisted` tells pnpm to lay out a flat `node_modules` that looks exactly like npm's — Metro, Expo CLI, `expo install`, config plugins, and anything else that walks `node_modules` directly all behave normally. The store and hardlink/clonefile mechanics are unchanged, so the disk savings are preserved. You get the storage model of pnpm with the compatibility surface of npm.
 
-One file per project:
+None of that applies outside Metro. A Next.js app or Node backend on hoisted just loses pnpm's strictness (undeclared imports silently resolve to whatever got hoisted) for no compatibility gain, so those packages keep the default. `goliathaudience.com/web` was scaffolded with `node-linker=hoisted` and moved to isolated on 2026-10-14; its Next 16 Turbopack dev server runs fine on the symlinked layout.
+
+**Expo / React Native app:**
 
 ```
 # <expo-app>/.npmrc
 node-linker=hoisted
 ```
+
+**Next.js app or Node backend** — write the comment so nobody "restores" the hoisted line later:
+
+```
+# <web-or-backend>/.npmrc
+# pnpm's default isolated layout: node_modules holds only symlinks to declared
+# deps, real files live in node_modules/.pnpm (hard-linked from the store).
+# No `node-linker=hoisted` — that flat npm-style layout is for Expo/Metro apps;
+# Next.js resolves pnpm's symlinks natively.
+```
+
+(For a Node backend, swap the last line for "Node's resolver follows pnpm's symlinks natively.")
+
+To confirm which layout a package actually has, read `node_modules/.modules.yaml` (`nodeLinker: isolated` or `hoisted`). On isolated, the top level of `node_modules` is only symlinks into `.pnpm/` (plus `.bin`, `.pnpm`, `.modules.yaml`); on hoisted it's real directories.
 
 ### Migration for an existing app
 
@@ -312,7 +338,7 @@ From the app's root directory:
 
 ```bash
 rm -rf node_modules package-lock.json yarn.lock
-echo 'node-linker=hoisted' > .npmrc
+echo 'node-linker=hoisted' > .npmrc   # Expo/RN apps ONLY — Next.js / Node packages get the comment-only .npmrc above
 pnpm import    # only if a package-lock.json / yarn.lock existed and you want to preserve exact versions
 pnpm install
 ```
@@ -481,8 +507,9 @@ One fewer Node process than the default stack (no Expo API routes to serve). The
 - **Running `expo start` in a shell with the wrong Node version** — `nvm use 20` in one terminal doesn't affect another. Check `node --version` in the exact shell where expo runs, not the one you just used to install packages.
 - **Calling `setColorScheme(...)` without `darkMode: "class"` in `tailwind.config.js`** — NativeWind defaults to `"media"` and throws at the first override. Set the config before you ship any manual theme code.
 - **Habitually passing `--clear` / `-c` to `expo start`** — Metro re-materializes the entire module graph into V8's heap on every start, spiking peak footprint to 2–4 GB per app and pushing a 16 GB Mac into swap once two dev servers are up. V8 doesn't hand the pages back when the process goes idle, so the cost is persistent, not transient. Configure `cacheVersion` in `metro.config.js` (see Expo Configuration Gotchas) so Metro auto-busts when meta files change, and reserve `--clear` for actual corruption.
-- **Installing standalone Expo apps with raw `npm install` (or unconfigured `yarn`)** — npm's cache stores tarballs, not extracted files, so every project ends up with its own ~1–1.3 GB copy of `react-native` + Expo SDK + Babel + Metro on disk. A few independent apps in one workspace balloon to tens of gigabytes of pure duplication (the Goliath directory hit 60 GB this way). Use `pnpm install` with `node-linker=hoisted` (see Package manager section) so every app's `node_modules` is hardlinked/clonefiled into a single machine-wide store.
-- **Using pnpm's default `isolated` linker for Expo apps** — the symlinked `.pnpm/` layout triggers phantom-dependency failures and Metro resolver breakage in the React Native ecosystem, and the fix is a running battle of `public-hoist-pattern` and `shamefully-hoist` tweaks. Set `node-linker=hoisted` in `.npmrc` up front. You still get the store-level dedup.
+- **Installing standalone Expo apps with raw `npm install` (or unconfigured `yarn`)** — npm's cache stores tarballs, not extracted files, so every project ends up with its own ~1–1.3 GB copy of `react-native` + Expo SDK + Babel + Metro on disk. A few independent apps in one workspace balloon to tens of gigabytes of pure duplication (the Goliath directory hit 60 GB this way). Use `pnpm install` (with `node-linker=hoisted` for the Expo app — see Package manager section) so every app's `node_modules` is hardlinked/clonefiled into a single machine-wide store.
+- **Using pnpm's default `isolated` linker for Expo apps** — the symlinked `.pnpm/` layout triggers phantom-dependency failures and Metro resolver breakage in the React Native ecosystem, and the fix is a running battle of `public-hoist-pattern` and `shamefully-hoist` tweaks. Set `node-linker=hoisted` in the Expo app's `.npmrc` up front. You still get the store-level dedup.
+- **Writing `node-linker=hoisted` into a Next.js or Node backend package** — the hoisted workaround exists only for Metro. Next.js (webpack and Turbopack) and Node resolve pnpm's symlinks natively, so hoisting there buys nothing and drops pnpm's phantom-dependency strictness. Scaffolds that copied the Expo `.npmrc` into `web/` (goliathaudience.com/web, diplomat/web) had to be converted back to the default isolated linker on 2026-10-14. Give non-Expo packages the comment-only `.npmrc` from the Package manager section.
 - **Placing the pnpm store on a different volume from your project repos** — pnpm falls back to *copying* files from the store instead of hardlinking/clonefiling across filesystems, which silently defeats the dedup and leaves you with full-size `node_modules` on every project. Keep projects and `~/Library/pnpm/store` on the same APFS volume, or set `store-dir` per-project to a same-volume path.
 
 ## Logging

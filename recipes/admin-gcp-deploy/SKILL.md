@@ -96,6 +96,8 @@ const bypass = process.env.LOCALHOST_AUTH_BYPASS === "true";
 
 One trigger on `^main$`, one Dockerfile per stack template, one `cloudbuild.yaml`. No staging environment by default — promote-via-tag or branch can be added later, but a fresh project ships with one prod target. The Dockerfile and cloudbuild.yaml are **checked into the repo** — not configured inline in the trigger console — so the build is reproducible and code-reviewable.
 
+**Only the build for `main`'s current head deploys.** Pushes reach Cloud Build late and out of order (2026-10-14: three filament.is pushes five minutes apart built 20-35 min later, the oldest commit last), so without a guard every queued build runs and the last one to *finish* wins, even when it is an older commit. The `supersede` step at the top of `cloudbuild.yaml` (see "Cloud Build + Dockerfile") asks GitHub for the branch head through the trigger's 2nd-gen connection: a build that isn't the head cancels itself; the head build cancels this trigger's earlier-created in-flight builds; if the head can't be read it logs a WARN and the build deploys as before.
+
 ## File Map
 
 What the recipe drops into the target project:
@@ -184,10 +186,19 @@ What it does, in order:
 4. Create build service account `<project>-build@` (separate from default Cloud Build SA so least-privilege is explicit)
 5. Bind IAM:
    - Runtime SA: `roles/secretmanager.secretAccessor`, `roles/datastore.user`
-   - Build SA: `roles/run.admin`, `roles/iam.serviceAccountUser`, `roles/artifactregistry.writer`, `roles/secretmanager.secretAccessor` (so build can pull build-time public vars)
+   - Build SA: `roles/run.admin`, `roles/iam.serviceAccountUser`, `roles/artifactregistry.writer`, `roles/secretmanager.secretAccessor` (so build can pull build-time public vars), `roles/logging.logWriter`, `roles/cloudbuild.builds.builder` (the `supersede` step describes, lists and cancels this trigger's builds)
 6. Create empty Secret Manager entries for each var in `.env.prod.example` (values populated separately, by the human)
 7. Read-only roles for the runtime SA so the status page can introspect deploy state: `roles/run.viewer`, `roles/cloudbuild.viewer`, `roles/secretmanager.viewer`
-8. Create the Cloud Build trigger pointing at `^main$` once the repo is connected (skips with a warning if the GitHub App isn't installed yet)
+8. Create the Cloud Build **2nd-gen** GitHub connection (`Github`, in `${REGION}`, reusing the org's Cloud Build GitHub App installation), the connection repository (`<repo>`, the `_GH_REPO` substitution) and a **regional** trigger on `^main$` running as the build SA (skips with a warning if the GitHub App isn't installed yet). Then let the build SA read the repo through the connection — the `supersede` step needs it to read `main`'s head; without it the step logs a WARN and cancels nothing (the grant is below).
+
+The step 8 grant:
+
+```bash
+gcloud builds connections add-iam-policy-binding Github \
+  --project=<project> --region=<region> \
+  --member=serviceAccount:<project>-build@<project>.iam.gserviceaccount.com \
+  --role=roles/cloudbuild.readTokenAccessor
+```
 
 The script must be run **after** the human creates the GCP project and links billing — it cannot do those itself.
 
@@ -256,9 +267,73 @@ substitutions:
   _SERVICE: <project>
   _REPO: <project>-images
   _PUBLIC_SITE_HOST: https://www.<domain>     # build-time public env (also surfaced as runtime env for prodEnv.prodHost())
+  # The Cloud Build (2nd gen) connection repository the supersede step reads
+  # the branch's live head through.
+  _GH_CONNECTION: Github
+  _GH_REPO: <repo>
 
 steps:
+  # Supersede: only the build for the branch's CURRENT head may deploy.
+  # Pushes reach Cloud Build late and out of order (2026-10-14: three pushes
+  # five minutes apart built 20-35 min later, the oldest commit last), so
+  # build creation order says nothing about commit order. Ask GitHub instead:
+  #   - this commit is not the head → a newer push supersedes it; cancel THIS
+  #     build so it can never deploy an older commit over the newer one.
+  #   - this commit is the head → cancel this trigger's other in-flight builds
+  #     created before this one (all older commits). Builds created after it
+  #     are left alone: a newer push cancels us itself, an older one cancels
+  #     itself on its own check.
+  # Touches only builds fired by this trigger. If the head can't be read, it
+  # skips cancelling and the build deploys as before: a missed cancel costs a
+  # redundant build, a failed step would cost a ship. The head is read through
+  # the Cloud Build (2nd gen) connection repository _GH_CONNECTION/_GH_REPO;
+  # the build SA needs roles/cloudbuild.readTokenAccessor on that connection
+  # and cloudbuild.builds.get/list/update (roles/cloudbuild.builds.builder) on
+  # the project (docs/deploy.md). $LOCATION is the build's own region (global for a
+  # 1st-gen trigger), which can differ from the connection's.
+  # Runs alongside the image build; the steps after it wait for it.
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: supersede
+    waitFor: ['-']
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        api=https://cloudbuild.googleapis.com/v2/projects/$PROJECT_ID/locations/${_REGION}/connections/${_GH_CONNECTION}/repositories/${_GH_REPO}
+        gauth="Authorization: Bearer $$(gcloud auth print-access-token)"
+        slug=$$(curl -fsS -H "$$gauth" "$$api" | python3 -c 'import sys,json; print(json.load(sys.stdin)["remoteUri"].removeprefix("https://github.com/").removesuffix(".git"))' || true)
+        token=$$(curl -fsS -X POST -H "$$gauth" -H 'Content-Type: application/json' -d '{}' "$$api:accessReadToken" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])' || true)
+        head=$$(curl -fsS -H "Authorization: Bearer $$token" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$$slug/git/ref/heads/$BRANCH_NAME" | python3 -c 'import sys,json; print(json.load(sys.stdin)["object"]["sha"])' || true)
+        if [ -z "$$head" ]; then
+          echo "WARN: could not read the head of $BRANCH_NAME; skipping supersede"
+          exit 0
+        fi
+        if [ "$$head" != "$COMMIT_SHA" ]; then
+          echo "$BRANCH_NAME is at $$head, not $COMMIT_SHA: superseded by a newer push, cancelling this build"
+          gcloud builds cancel $BUILD_ID --project=$PROJECT_ID --region=$LOCATION
+          # The cancel stops this step; if it hasn't by now, fail the build so
+          # the deploy can't run.
+          sleep 120
+          exit 1
+        fi
+        mine=$$(gcloud builds describe $BUILD_ID --project=$PROJECT_ID --region=$LOCATION \
+                  --format='csv[no-heading](buildTriggerId,createTime)' 2>/dev/null || true)
+        trigger=$${mine%%,*}
+        created=$${mine#*,}
+        if [ -z "$$trigger" ] || [ -z "$$created" ] || [ "$$trigger" = "$$mine" ]; then
+          echo "WARN: could not read this build's trigger/createTime; skipping supersede"
+          exit 0
+        fi
+        older=$$(gcloud builds list --project=$PROJECT_ID --region=$LOCATION --ongoing \
+                   --filter="buildTriggerId=$$trigger AND createTime<\"$$created\"" \
+                   --format='value(id)' 2>/dev/null || true)
+        for b in $$older; do
+          [ "$$b" = "$BUILD_ID" ] && continue
+          echo "cancelling superseded build $$b"
+          gcloud builds cancel "$$b" --project=$PROJECT_ID --region=$LOCATION || true
+        done
   - name: gcr.io/cloud-builders/docker
+    waitFor: ['-']
     args:
       - build
       - --build-arg=PUBLIC_SITE_HOST=${_PUBLIC_SITE_HOST}
@@ -287,6 +362,15 @@ options:
 ```
 
 **Substitution naming is load-bearing**: the build-arg name (`PUBLIC_SITE_HOST`), the cloudbuild substitution key (`_PUBLIC_SITE_HOST`), and the runtime env var (`NEXT_PUBLIC_SITE_HOST`) must all align with what `prodEnv.ts` reads. Mismatches (e.g., cloudbuild substitution named `_PUBLIC_SITE_URL` while `prodEnv.ts` reads `_PUBLIC_SITE_HOST`) produce silent "prod hostname not configured" failures with no obvious cause.
+
+**The `supersede` step** (reference: `filament.is/app/cloudbuild.yaml`) is the same in every project; only `_GH_CONNECTION` / `_GH_REPO` differ. Fitting it:
+
+- **Read the trigger before setting the substitutions**: `gcloud builds triggers list --project=<p> --region=<region>` (2nd gen, regional) and `--region=global` (1st gen). A 2nd-gen trigger's `repositoryEventConfig.repository` is `projects/<p>/locations/<region>/connections/<_GH_CONNECTION>/repositories/<_GH_REPO>` — copy both names from it. The connection's region is `${_REGION}` in the script; use whatever substitution holds it in that project.
+- **A 1st-gen (GitHub App, global) trigger has no connection**, and the read token is scoped to one repository, so create a 2nd-gen connection + repository in the project purely for the read and leave the trigger as it is: `gcloud builds connections create github Github --region=<region> --app-installation-id=<org installation id> --authorizer-token-secret-version=projects/<p>/secrets/github-oauthtoken/versions/latest` (the secret holds a GitHub user token; the Cloud Build service agent `service-<number>@gcp-sa-cloudbuild.iam.gserviceaccount.com` needs `secretAccessor` on it), then `gcloud builds repositories create <repo> --connection=Github --region=<region> --remote-uri=https://github.com/<org>/<repo>.git`.
+- **Grant the trigger's own SA** (`gcloud builds triggers describe … --format='value(serviceAccount)'` — on old triggers it's often the Compute default SA, not `<project>-build@`) `roles/cloudbuild.readTokenAccessor` on the connection and `roles/cloudbuild.builds.builder` (or anything with `cloudbuild.builds.get/list/update`) on the project.
+- **Builds are addressed with `$LOCATION`**, the build's own region: `global` for a 1st-gen trigger, which differs from the connection's region.
+- **Step graph**: the step has `waitFor: ['-']`; give the image build `waitFor: ['-']` too so it runs alongside, and make sure the deploy step waits for `supersede` (implicitly, by having no `waitFor`, or by listing it in an explicit `waitFor`).
+- **Test before pushing, never with a manual build**: render the step's script the way Cloud Build does (`$$` → `$`, `${_X}`/`$X` → value; an unknown name is an error), put a `gcloud` stub first on `PATH` that passes everything through except `builds cancel` (and a `sleep` stub), and run it three ways against a real recent build of the trigger: `COMMIT_SHA` = the current head (expects no self-cancel; append a fake id to the `builds list` output to exercise the cancel loop), an older SHA (expects the self-cancel and `exit 1`), and a bogus `_GH_REPO` (expects the WARN and `exit 0`).
 
 Dockerfile templates ship per stack. Each follows the same shape — multi-stage build, non-root runtime, healthcheck endpoint at `GET /healthz` returning 200, `PORT` env honored, no secrets in the image:
 
@@ -419,7 +503,7 @@ This order guarantees every status response sees a complete registry — no race
 |---|---|---|
 | `gcp-project-billing` | Project exists, billing linked | Any GCP API call from runtime SA returns 200 (not "billing not enabled") |
 | `firestore-online` | Firestore created in MongoDB-compat mode, user exists | Connect via `MONGO_URI`, run `db.runCommand({ping:1})` |
-| `cloudbuild-github-connected` | Cloud Build GitHub App installed, repo connected | Cloud Build API: list triggers; expect ≥1 pointing at this repo |
+| `cloudbuild-github-connected` | Cloud Build GitHub App installed, repo connected | Cloud Build API: list triggers in the deploy region (`/v1/projects/<p>/locations/<region>/triggers`) **and** global, merged — the global list returns `{}` for regional triggers. A trigger points at a repo via `github.owner/name` (1st gen) or `repositoryEventConfig.repository` (2nd gen); expect ≥1 |
 | `domain-verified` | Custom domain verified + Cloud Run mapping `READY` | Cloud Run API: domain mapping resource state |
 | `dns-records-published` | All required DNS records resolve correctly | DNS lookup for the prod hostname (A/AAAA/CNAME) |
 | `ssl-cert-active` | Managed SSL cert is `ACTIVE` | TLS handshake to prod URL with valid cert chain |
@@ -432,7 +516,7 @@ This order guarantees every status response sees a complete registry — no race
 | `secrets-populated` | Every entry in env-matrix has a non-empty value in Secret Manager | Secret Manager API: list versions per secret | `bootstrap-ran` |
 | `initial-data-sync` | First-time data sync ran | `_deploy_meta.synced_at` exists in Firestore | `firestore-online` |
 | `first-deploy-succeeded` | Cloud Run service has at least one healthy revision | Cloud Run API: revision status | `bootstrap-ran`, `cloudbuild-github-connected`, `secrets-populated` |
-| `last-build-status` | Most recent Cloud Build for `main` succeeded | Cloud Build API: list builds, filter by trigger | `cloudbuild-github-connected` |
+| `last-build-status` | Most recent Cloud Build for `main` that ran to an outcome succeeded | Cloud Build API: list builds (`pageSize=20`) in the deploy region **and** global, merged newest-first; skip `CANCELLED` (the `supersede` step cancels every build a newer push replaces) — `pending` if every build in the window was cancelled. Build links: `cloud-build/builds;region=<build location>/<id>` | `cloudbuild-github-connected` |
 
 **Runtime invariants** (page asserts these continuously, regardless of human/auto status):
 
@@ -820,6 +904,8 @@ Before installing, the recipe asks:
 
 ## Anti-Patterns
 
+- **Letting every queued build deploy** — pushes reach Cloud Build late and out of order, so the last build to finish wins even when it's an older commit. Every `cloudbuild.yaml` carries the `supersede` step; the trigger's SA holds `readTokenAccessor` on the connection and `cloudbuild.builds.builder` on the project.
+- **Listing Cloud Build triggers or builds only globally** — `GET /v1/projects/<p>/triggers` returns `{}` for regional (2nd-gen) triggers and `builds` misses regional builds, so the deploy page says "no trigger" / "no builds" for a project that deploys fine. Query the deploy region and global, and merge.
 - **Configuring the build inline in the Cloud Build trigger console** — uncheckable into git, invisible in PR review, lost when the trigger is recreated. Always check `cloudbuild.yaml` into the repo.
 - **`LOCALHOST_AUTH_BYPASS !== "false"` (or any default-to-true variant)** — opens admin to the world on any fresh deploy with no env config. Always `=== "true"`, fail-secure.
 - **Mounting `NEXT_PUBLIC_*` / `EXPO_PUBLIC_*` as Cloud Run runtime secrets** — they bake into the bundle at build time, so a runtime-only mount produces undefined client-side. Push them through Cloud Build substitutions instead.
